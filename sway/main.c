@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <getopt.h>
 #include <pango/pangocairo.h>
 #include <signal.h>
@@ -47,44 +46,6 @@ void sway_terminate(int exit_code) {
 
 void sig_handler(int signal) {
 	sway_terminate(EXIT_SUCCESS);
-}
-
-void detect_proprietary(int allow_unsupported_gpu) {
-	FILE *f = fopen("/proc/modules", "r");
-	if (!f) {
-		return;
-	}
-	char *line = NULL;
-	size_t line_size = 0;
-	while (getline(&line, &line_size, f) != -1) {
-		if (strncmp(line, "nvidia ", 7) == 0) {
-			if (allow_unsupported_gpu) {
-				sway_log(SWAY_ERROR,
-						"!!! Proprietary Nvidia drivers are in use !!!");
-			} else {
-				sway_log(SWAY_ERROR,
-					"Proprietary Nvidia drivers are NOT supported. "
-					"Use Nouveau. To launch sway anyway, launch with "
-					"--unsupported-gpu and DO NOT report issues.");
-				exit(EXIT_FAILURE);
-			}
-			break;
-		}
-		if (strstr(line, "fglrx")) {
-			if (allow_unsupported_gpu) {
-				sway_log(SWAY_ERROR,
-						"!!! Proprietary AMD drivers are in use !!!");
-			} else {
-				sway_log(SWAY_ERROR, "Proprietary AMD drivers do NOT support "
-					"Wayland. Use radeon. To try anyway, launch sway with "
-					"--unsupported-gpu and DO NOT report issues.");
-				exit(EXIT_FAILURE);
-			}
-			break;
-		}
-	}
-	free(line);
-	fclose(f);
 }
 
 void run_as_ipc_client(char *command, char *socket_path) {
@@ -192,11 +153,7 @@ void restore_nofile_limit(void) {
 }
 
 void enable_debug_flag(const char *flag) {
-	if (strcmp(flag, "damage=highlight") == 0) {
-		debug.damage = DAMAGE_HIGHLIGHT;
-	} else if (strcmp(flag, "damage=rerender") == 0) {
-		debug.damage = DAMAGE_RERENDER;
-	} else if (strcmp(flag, "noatomic") == 0) {
+	if (strcmp(flag, "noatomic") == 0) {
 		debug.noatomic = true;
 	} else if (strcmp(flag, "txn-wait") == 0) {
 		debug.txn_wait = true;
@@ -204,8 +161,8 @@ void enable_debug_flag(const char *flag) {
 		debug.txn_timings = true;
 	} else if (strncmp(flag, "txn-timeout=", 12) == 0) {
 		server.txn_timeout_ms = atoi(&flag[12]);
-	} else if (strcmp(flag, "noscanout") == 0) {
-		debug.noscanout = true;
+	} else if (strcmp(flag, "legacy-wl-drm") == 0) {
+		debug.legacy_wl_drm = true;
 	} else {
 		sway_log(SWAY_ERROR, "Unknown debug flag: %s", flag);
 	}
@@ -255,7 +212,7 @@ static const char usage[] =
 	"\n";
 
 int main(int argc, char **argv) {
-	static bool verbose = false, debug = false, validate = false, allow_unsupported_gpu = false;
+	static bool verbose = false, debug = false, validate = false;
 
 	char *config_path = NULL;
 
@@ -363,7 +320,6 @@ int main(int argc, char **argv) {
 		return 0;
 	}
 
-	detect_proprietary(allow_unsupported_gpu);
 	increase_nofile_limit();
 
 	// handle SIGTERM signals
@@ -376,10 +332,12 @@ int main(int argc, char **argv) {
 	sway_log(SWAY_INFO, "Starting swayfx version " SWAY_VERSION
 			" (based on sway version " SWAY_ORIGINAL_VERSION ")");
 
-	root = root_create();
-
 	if (!server_init(&server)) {
 		return 1;
+	}
+
+	if (server.linux_dmabuf_v1) {
+		wlr_scene_set_linux_dmabuf_v1(root->root_scene, server.linux_dmabuf_v1);
 	}
 
 	if (validate) {
@@ -404,6 +362,7 @@ int main(int argc, char **argv) {
 	}
 
 	config->active = true;
+	force_modeset();
 	load_swaybars();
 	run_deferred_commands();
 	run_deferred_bindings();

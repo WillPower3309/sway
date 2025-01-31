@@ -1,7 +1,4 @@
-#include "scenefx/render/fx_renderer/fx_effect_framebuffers.h"
 #include "sway/commands.h"
-#include "sway/config.h"
-#include "sway/output.h"
 
 struct cmd_results *cmd_blur_contrast(int argc, char **argv) {
 	struct cmd_results *error = NULL;
@@ -12,18 +9,13 @@ struct cmd_results *cmd_blur_contrast(int argc, char **argv) {
 	char *inv;
 	float value = strtof(argv[0], &inv);
 	if (*inv != '\0' || value < 0 || value > 2) {
-		return cmd_results_new(CMD_FAILURE, "Invalid brightness specified");
+		return cmd_results_new(CMD_FAILURE, "Invalid contrast specified");
 	}
 
-	config->blur_params.contrast = value;
-
-	struct sway_output *output;
-	wl_list_for_each(output, &root->all_outputs, link) {
-		struct fx_effect_framebuffers *effect_fbos =
-			fx_effect_framebuffers_try_get(output->wlr_output);
-		effect_fbos->blur_buffer_dirty = true;
-		output_damage_whole(output);
-	}
+	struct wlr_scene *root_scene = root->root_scene;
+	struct blur_data blur_data = root_scene->blur_data;
+	blur_data.contrast = value;
+	wlr_scene_set_blur_data(root_scene, blur_data);
 
 	return cmd_results_new(CMD_SUCCESS, NULL);
 }

@@ -9,17 +9,17 @@ sway_sources = files(
 	'lock.c',
 	'main.c',
 	'realtime.c',
+	'scene_descriptor.c',
 	'server.c',
+	'sway_text_node.c',
 	'swaynag.c',
 	'xdg_activation_v1.c',
 	'xdg_decoration.c',
 
-	'desktop/desktop.c',
 	'desktop/idle_inhibit_v1.c',
 	'desktop/layer_shell.c',
 	'desktop/output.c',
-	'desktop/render.c',
-	'desktop/surface.c',
+	'desktop/tearing.c',
 	'desktop/transaction.c',
 	'desktop/xdg_shell.c',
 	'desktop/launcher.c',
@@ -43,6 +43,7 @@ sway_sources = files(
 	'config/seat.c',
 	'config/input.c',
 
+	'commands/allow_tearing.c',
 	'commands/assign.c',
 	'commands/bar.c',
 	'commands/bind.c',
@@ -57,7 +58,6 @@ sway_sources = files(
 	'commands/border.c',
 	'commands/client.c',
 	'commands/corner_radius.c',
-	'commands/smart_corner_radius.c',
 	'commands/create_output.c',
 	'commands/default_border.c',
 	'commands/default_dim_inactive.c',
@@ -105,7 +105,6 @@ sway_sources = files(
 	'commands/reload.c',
 	'commands/rename.c',
 	'commands/resize.c',
-	'commands/saturation.c',
 	'commands/scratchpad.c',
 	'commands/scratchpad_minimize.c',
 	'commands/seat.c',
@@ -118,17 +117,17 @@ sway_sources = files(
 	'commands/seat/pointer_constraint.c',
 	'commands/seat/shortcuts_inhibitor.c',
 	'commands/seat/xcursor_theme.c',
-	'commands/titlebar_separator.c',
 	'commands/set.c',
 	'commands/shadow_blur_radius.c',
 	'commands/shadow_color.c',
-    'commands/shadow_offset.c',
 	'commands/shadow_inactive_color.c',
+	'commands/shadow_offset.c',
 	'commands/shadows.c',
 	'commands/shadows_on_csd.c',
 	'commands/show_marks.c',
 	'commands/shortcuts_inhibitor.c',
 	'commands/smart_borders.c',
+	'commands/smart_corner_radius.c',
 	'commands/smart_gaps.c',
 	'commands/split.c',
 	'commands/sticky.c',
@@ -141,6 +140,7 @@ sway_sources = files(
 	'commands/title_format.c',
 	'commands/titlebar_border_thickness.c',
 	'commands/titlebar_padding.c',
+	'commands/titlebar_separator.c',
 	'commands/unmark.c',
 	'commands/urgent.c',
 	'commands/workspace.c',
@@ -179,6 +179,7 @@ sway_sources = files(
 	'commands/input/accel_profile.c',
 	'commands/input/calibration_matrix.c',
 	'commands/input/click_method.c',
+	'commands/input/clickfinger_button_map.c',
 	'commands/input/drag.c',
 	'commands/input/drag_lock.c',
 	'commands/input/dwt.c',
@@ -191,7 +192,7 @@ sway_sources = files(
 	'commands/input/middle_emulation.c',
 	'commands/input/natural_scroll.c',
 	'commands/input/pointer_accel.c',
-        'commands/input/rotation_angle.c',
+	'commands/input/rotation_angle.c',
 	'commands/input/repeat_delay.c',
 	'commands/input/repeat_rate.c',
 	'commands/input/scroll_button.c',
@@ -212,6 +213,7 @@ sway_sources = files(
 	'commands/input/xkb_variant.c',
 
 	'commands/output/adaptive_sync.c',
+	'commands/output/allow_tearing.c',
 	'commands/output/background.c',
 	'commands/output/disable.c',
 	'commands/output/dpms.c',
@@ -227,6 +229,7 @@ sway_sources = files(
 	'commands/output/toggle.c',
 	'commands/output/transform.c',
 	'commands/output/unplug.c',
+	'commands/output/color_profile.c',
 
 	'tree/arrange.c',
 	'tree/container.c',
@@ -255,10 +258,9 @@ sway_deps = [
 	xkbcommon,
 	xcb,
 	xcb_icccm,
-	egl,
 ]
 
-if have_xwayland
+if wlroots_features['xwayland']
 	sway_sources += 'desktop/xwayland.c'
 endif
 
@@ -274,4 +276,3 @@ executable(
 	link_with: [lib_sway_common],
 	install: true
 )
-

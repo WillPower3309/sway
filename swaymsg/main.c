@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 
 #include <limits.h>
 #include <stdio.h>
@@ -194,7 +193,7 @@ static void pretty_print_output(json_object *o) {
 	json_object_object_get_ex(o, "current_workspace", &ws);
 	json_object_object_get_ex(o, "non_desktop", &non_desktop);
 	json_object *make, *model, *serial, *scale, *scale_filter, *subpixel,
-		*transform, *max_render_time, *adaptive_sync_status;
+		*transform, *max_render_time, *adaptive_sync_status, *allow_tearing;
 	json_object_object_get_ex(o, "make", &make);
 	json_object_object_get_ex(o, "model", &model);
 	json_object_object_get_ex(o, "serial", &serial);
@@ -204,6 +203,7 @@ static void pretty_print_output(json_object *o) {
 	json_object_object_get_ex(o, "transform", &transform);
 	json_object_object_get_ex(o, "max_render_time", &max_render_time);
 	json_object_object_get_ex(o, "adaptive_sync_status", &adaptive_sync_status);
+	json_object_object_get_ex(o, "allow_tearing", &allow_tearing);
 	json_object *x, *y;
 	json_object_object_get_ex(rect, "x", &x);
 	json_object_object_get_ex(rect, "y", &y);
@@ -257,6 +257,9 @@ static void pretty_print_output(json_object *o) {
 
 		printf("  Adaptive sync: %s\n",
 			json_object_get_string(adaptive_sync_status));
+
+		printf("  Allow tearing: %s\n",
+			json_object_get_boolean(allow_tearing) ? "yes" : "no");
 	} else {
 		printf(
 			"Output %s '%s %s %s' (disabled)\n",
@@ -297,12 +300,9 @@ static void pretty_print_output(json_object *o) {
 }
 
 static void pretty_print_version(json_object *v) {
-	json_object *swayfx_ver;
-	json_object *sway_ver;
-	json_object_object_get_ex(v, "human_readable", &swayfx_ver);
-	json_object_object_get_ex(v, "sway_original_version", &sway_ver);
-	printf("swayfx version %s (based on sway %s)\n",
-			json_object_get_string(swayfx_ver), json_object_get_string(sway_ver));
+	json_object *ver;
+	json_object_object_get_ex(v, "human_readable", &ver);
+	printf("sway version %s\n", json_object_get_string(ver));
 }
 
 static void pretty_print_config(json_object *c) {

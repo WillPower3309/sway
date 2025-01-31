@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <ctype.h>
 #include <math.h>
 #include <stdbool.h>
@@ -12,6 +11,7 @@
 #include "sway/input/seat.h"
 #include "sway/ipc-server.h"
 #include "sway/output.h"
+#include "sway/server.h"
 #include "sway/tree/arrange.h"
 #include "sway/tree/container.h"
 #include "sway/tree/root.h"
@@ -240,7 +240,6 @@ static void container_move_to_workspace(struct sway_container *container,
 static void container_move_to_container(struct sway_container *container,
 		struct sway_container *destination) {
 	if (container == destination
-			|| container_has_ancestor(container, destination)
 			|| container_has_ancestor(destination, container)) {
 		return;
 	}
@@ -510,6 +509,7 @@ static struct cmd_results *cmd_move_container(bool no_auto_back_and_forth,
 				}
 			}
 			ws = workspace_create(NULL, ws_name);
+			arrange_workspace(ws);
 		}
 		free(ws_name);
 		struct sway_container *dst = seat_get_focus_inactive_tiling(seat, ws);
@@ -770,15 +770,6 @@ static struct cmd_results *cmd_move_in_direction(
 		ipc_event_window(container, "move");
 	}
 
-	// Hack to re-focus container
-	seat_set_raw_focus(config->handler_context.seat, &new_ws->node);
-	seat_set_focus_container(config->handler_context.seat, container);
-
-	if (old_ws != new_ws) {
-		ipc_event_workspace(old_ws, new_ws, "focus");
-		workspace_detect_urgent(old_ws);
-		workspace_detect_urgent(new_ws);
-	}
 	container_end_mouse_operation(container);
 
 	return cmd_results_new(CMD_SUCCESS, NULL);

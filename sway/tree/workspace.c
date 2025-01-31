@@ -1,18 +1,16 @@
-#define _POSIX_C_SOURCE 200809
 #include <ctype.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <strings.h>
-#include <wayland-util.h>
 #include "stringop.h"
 #include "sway/input/input-manager.h"
 #include "sway/input/cursor.h"
 #include "sway/input/seat.h"
 #include "sway/ipc-server.h"
-#include "sway/layers.h"
 #include "sway/output.h"
+#include "sway/server.h"
 #include "sway/tree/arrange.h"
 #include "sway/tree/container.h"
 #include "sway/tree/node.h"
@@ -73,6 +71,18 @@ struct sway_workspace *workspace_create(struct sway_output *output,
 		return NULL;
 	}
 	node_init(&ws->node, N_WORKSPACE, ws);
+
+	bool failed = false;
+	ws->layers.tiling = alloc_scene_tree(root->staging, &failed);
+	ws->layers.fullscreen = alloc_scene_tree(root->staging, &failed);
+
+	if (failed) {
+		wlr_scene_node_destroy(&ws->layers.tiling->node);
+		wlr_scene_node_destroy(&ws->layers.fullscreen->node);
+		free(ws);
+		return NULL;
+	}
+
 	ws->name = strdup(name);
 	ws->prev_split_layout = L_NONE;
 	ws->layout = output_get_default_layout(output);
@@ -132,6 +142,11 @@ void workspace_destroy(struct sway_workspace *workspace) {
 				"which is still referenced by transactions")) {
 		return;
 	}
+
+	scene_node_disown_children(workspace->layers.tiling);
+	scene_node_disown_children(workspace->layers.fullscreen);
+	wlr_scene_node_destroy(&workspace->layers.tiling->node);
+	wlr_scene_node_destroy(&workspace->layers.fullscreen->node);
 
 	free(workspace->name);
 	free(workspace->representation);
@@ -671,64 +686,7 @@ void workspace_detect_urgent(struct sway_workspace *workspace) {
 	if (workspace->urgent != new_urgent) {
 		workspace->urgent = new_urgent;
 		ipc_event_workspace(NULL, workspace, "urgent");
-		output_damage_whole(workspace->output);
 	}
-}
-
-struct blur_region_data {
-	struct sway_workspace *ws;
-	pixman_region32_t *blur_region;
-};
-
-static void find_blurred_region_iterator(struct sway_container *con, void *data) {
-	struct sway_view *view = con->view;
-	if (!view) {
-		return;
-	}
-
-	struct blur_region_data *region_data = data;
-	struct sway_workspace *ws = region_data->ws;
-	pixman_region32_t *blur_region = region_data->blur_region;
-
-	if (con->blur_enabled && !view->surface->opaque) {
-		struct wlr_box region = {
-			.x = floor(con->current.x) - ws->output->lx,
-			.y = floor(con->current.y) - ws->output->ly,
-			.width = con->current.width,
-			.height = con->current.height,
-		};
-		scale_box(&region, ws->output->wlr_output->scale);
-		pixman_region32_union_rect(blur_region, blur_region,
-				region.x, region.y, region.width, region.height);
-	}
-}
-
-bool workspace_get_blur_info(struct sway_workspace *ws, pixman_region32_t *blur_region) {
-	if (!workspace_is_visible(ws) || !config_should_parameters_blur()) {
-		return false;
-	}
-
-	// Each toplevel
-	struct blur_region_data data = { ws, blur_region };
-	workspace_for_each_container(ws, find_blurred_region_iterator, &data);
-
-	// Each Layer
-	struct sway_output *sway_output = ws->output;
-	size_t len = sizeof(sway_output->layers) / sizeof(sway_output->layers[0]);
-	for (size_t i = 0; i < len; ++i) {
-		struct sway_layer_surface *lsurface;
-		wl_list_for_each(lsurface, &sway_output->layers[i], link) {
-			if (lsurface->has_blur && !lsurface->layer_surface->surface->opaque
-					&& lsurface->layer != ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND) {
-				struct wlr_box geo = lsurface->geo;
-				scale_box(&geo, sway_output->wlr_output->scale);
-				pixman_region32_union_rect(blur_region, blur_region,
-						geo.x, geo.y, geo.width, geo.height);
-			}
-		}
-	}
-
-	return pixman_region32_not_empty(blur_region);
 }
 
 void workspace_for_each_container(struct sway_workspace *ws,
@@ -750,6 +708,11 @@ void workspace_for_each_container(struct sway_workspace *ws,
 struct sway_container *workspace_find_container(struct sway_workspace *ws,
 		bool (*test)(struct sway_container *con, void *data), void *data) {
 	struct sway_container *result = NULL;
+    if (ws == NULL){
+        sway_log(SWAY_ERROR, "Cannot find container with no workspace.");
+        return NULL;
+    }
+
 	// Tiling
 	for (int i = 0; i < ws->tiling->length; ++i) {
 		struct sway_container *child = ws->tiling->items[i];

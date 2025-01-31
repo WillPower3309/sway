@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <stdlib.h>
 #include <wlr/config.h>
 #include <wlr/types/wlr_tablet_v2.h>
@@ -8,6 +7,7 @@
 #include "sway/input/cursor.h"
 #include "sway/input/seat.h"
 #include "sway/input/tablet.h"
+#include "sway/server.h"
 
 #if WLR_HAS_LIBINPUT_BACKEND
 #include <wlr/backend/libinput.h>

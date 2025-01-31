@@ -1,31 +1,80 @@
-#define _POSIX_C_SOURCE 200809L
+#include "sway/tree/container.h"
 #include <assert.h>
 #include <drm_fourcc.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <wayland-server-core.h>
+#include <wlr/types/wlr_foreign_toplevel_management_v1.h>
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/util/box.h>
 #include "linux-dmabuf-unstable-v1-protocol.h"
-#include "cairo_util.h"
-#include "pango.h"
+#include "scenefx/types/fx/corner_location.h"
 #include "sway/config.h"
-#include "sway/desktop.h"
 #include "sway/desktop/transaction.h"
 #include "sway/input/input-manager.h"
 #include "sway/input/seat.h"
 #include "sway/ipc-server.h"
+#include "sway/scene_descriptor.h"
+#include "sway/sway_text_node.h"
 #include "sway/output.h"
 #include "sway/server.h"
-#include "sway/surface.h"
 #include "sway/tree/arrange.h"
 #include "sway/tree/view.h"
 #include "sway/tree/workspace.h"
 #include "sway/xdg_decoration.h"
 #include "list.h"
+#include "pango.h"
 #include "log.h"
 #include "stringop.h"
+
+static void handle_output_enter(
+		struct wl_listener *listener, void *data) {
+	struct sway_container *con = wl_container_of(
+			listener, con, output_enter);
+	struct wlr_scene_output *output = data;
+
+	if (con->view->foreign_toplevel) {
+		wlr_foreign_toplevel_handle_v1_output_enter(
+			con->view->foreign_toplevel, output->output);
+	}
+}
+
+static void handle_output_leave(
+		struct wl_listener *listener, void *data) {
+	struct sway_container *con = wl_container_of(
+			listener, con, output_leave);
+	struct wlr_scene_output *output = data;
+
+	if (con->view->foreign_toplevel) {
+		wlr_foreign_toplevel_handle_v1_output_leave(
+			con->view->foreign_toplevel, output->output);
+	}
+}
+
+static bool handle_point_accepts_input(
+		struct wlr_scene_buffer *buffer, double *x, double *y) {
+	return false;
+}
+
+static struct wlr_scene_rect *alloc_rect_node(struct wlr_scene_tree *parent,
+		bool *failed) {
+	if (*failed) {
+		return NULL;
+	}
+
+	// just pass in random values. These will be overwritten when
+	// they need to be used.
+	struct wlr_scene_rect *rect = wlr_scene_rect_create(
+		parent, 0, 0, (float[4]){0.f, 0.f, 0.f, 1.f});
+	if (!rect) {
+		sway_log(SWAY_ERROR, "Failed to allocate a wlr_scene_rect");
+		*failed = true;
+	}
+
+	return rect;
+}
 
 struct sway_container *container_create(struct sway_view *view) {
 	struct sway_container *c = calloc(1, sizeof(struct sway_container));
@@ -34,26 +83,429 @@ struct sway_container *container_create(struct sway_view *view) {
 		return NULL;
 	}
 	node_init(&c->node, N_CONTAINER, c);
-	c->pending.layout = L_NONE;
-	c->view = view;
-	c->alpha = 1.0f;
-	c->saturation = 1.0f;
-	c->dim = config->default_dim_inactive;
-	c->shadow_enabled = config->shadow_enabled;
-	c->blur_enabled = config->blur_enabled;
-	c->corner_radius = config->corner_radius;
+
+	// Container tree structure
+	// - scene tree
+	//   - shadow
+	//   - title bar
+	//     - border
+	//     - background
+	//     - title text
+	//     - marks text
+	//   - border
+	//     - border top/bottom/left/right
+	//     - content_tree (we put the content node here so when we disable the
+	//       border everything gets disabled. We only render the content iff there
+	//       is a border as well)
+	//     - buffer used for output enter/leave events for foreign_toplevel
+	bool failed = false;
+	c->scene_tree = alloc_scene_tree(root->staging, &failed);
+
+	c->shadow = alloc_scene_shadow(c->scene_tree, 0, 0,
+			0, config->shadow_blur_sigma, config->shadow_color, &failed);
+
+	c->title_bar.tree = alloc_scene_tree(c->scene_tree, &failed);
+
+	c->border.tree = alloc_scene_tree(c->scene_tree, &failed);
+	c->content_tree = alloc_scene_tree(c->border.tree, &failed);
+
+	c->title_bar.border = alloc_rect_node(c->title_bar.tree, &failed);
+	c->title_bar.background = alloc_rect_node(c->title_bar.tree, &failed);
+
+	if (view) {
+		// only containers with views can have borders
+		c->border.top = alloc_rect_node(c->border.tree, &failed);
+		c->border.bottom = alloc_rect_node(c->border.tree, &failed);
+		c->border.left = alloc_rect_node(c->border.tree, &failed);
+		c->border.right = alloc_rect_node(c->border.tree, &failed);
+
+		c->dim_rect = alloc_rect_node(c->border.tree, &failed);
+		// Disable rect input
+		c->dim_rect->accepts_input = false;
+
+		c->output_handler = wlr_scene_buffer_create(c->border.tree, NULL);
+		if (!c->output_handler) {
+			sway_log(SWAY_ERROR, "Failed to allocate a scene node");
+			failed = true;
+		}
+
+		if (!failed) {
+			c->output_enter.notify = handle_output_enter;
+			wl_signal_add(&c->output_handler->events.output_enter,
+					&c->output_enter);
+			c->output_leave.notify = handle_output_leave;
+			wl_signal_add(&c->output_handler->events.output_leave,
+					&c->output_leave);
+			c->output_handler->point_accepts_input = handle_point_accepts_input;
+		}
+	}
+
+	if (!failed && !scene_descriptor_assign(&c->scene_tree->node,
+			SWAY_SCENE_DESC_CONTAINER, c)) {
+		failed = true;
+	}
+
+	if (failed) {
+		wlr_scene_node_destroy(&c->scene_tree->node);
+		free(c);
+		return NULL;
+	}
 
 	if (!view) {
 		c->pending.children = create_list();
 		c->current.children = create_list();
 	}
+
+	c->pending.layout = L_NONE;
+	c->view = view;
+	c->alpha = 1.0f;
 	c->marks = create_list();
-	c->outputs = create_list();
+	c->corner_radius = config->corner_radius;
+	c->blur_enabled = config->blur_enabled;
+	c->shadow_enabled = config->shadow_enabled;
+	c->dim = config->default_dim_inactive;
 
 	wl_signal_init(&c->events.destroy);
 	wl_signal_emit_mutable(&root->events.new_node, &c->node);
 
+	container_update(c);
+
 	return c;
+}
+
+static bool container_is_focused(struct sway_container *con, void *data) {
+	return con->current.focused;
+}
+
+static bool container_has_focused_child(struct sway_container *con) {
+	return container_find_child(con, container_is_focused, NULL);
+}
+
+static bool container_is_current_parent_focused(struct sway_container *con) {
+	if (con->current.parent) {
+		struct sway_container *parent = con->current.parent;
+		return parent->current.focused || container_is_current_parent_focused(parent);
+	} else if (con->current.workspace) {
+		struct sway_workspace *ws = con->current.workspace;
+		return ws->current.focused;
+	}
+
+	return false;
+}
+
+static struct border_colors *container_get_current_colors(
+		struct sway_container *con) {
+	struct border_colors *colors;
+
+	bool urgent = con->view ?
+		view_is_urgent(con->view) : container_has_urgent_child(con);
+	struct sway_container *active_child;
+
+	if (con->current.parent) {
+		active_child = con->current.parent->current.focused_inactive_child;
+	} else if (con->current.workspace) {
+		active_child = con->current.workspace->current.focused_inactive_child;
+	} else {
+		active_child = NULL;
+	}
+
+	if (urgent) {
+		colors = &config->border_colors.urgent;
+	} else if (con->current.focused || container_is_current_parent_focused(con)) {
+		colors = &config->border_colors.focused;
+	} else if (config->has_focused_tab_title && container_has_focused_child(con)) {
+		colors = &config->border_colors.focused_tab_title;
+	} else if (con == active_child) {
+		colors = &config->border_colors.focused_inactive;
+	} else {
+		colors = &config->border_colors.unfocused;
+	}
+
+	return colors;
+}
+
+static bool container_is_current_floating(struct sway_container *container) {
+	if (!container->current.parent && container->current.workspace &&
+			list_find(container->current.workspace->floating, container) != -1) {
+		return true;
+	}
+	if (container->scratchpad) {
+		return true;
+	}
+	return false;
+}
+
+// scene rect wants premultiplied colors
+static void scene_rect_set_color(struct wlr_scene_rect *rect,
+		const float color[4], float opacity) {
+	const float premultiplied[] = {
+		color[0] * color[3] * opacity,
+		color[1] * color[3] * opacity,
+		color[2] * color[3] * opacity,
+		color[3] * opacity,
+	};
+
+	wlr_scene_rect_set_color(rect, premultiplied);
+}
+
+void container_update(struct sway_container *con) {
+	struct border_colors *colors = container_get_current_colors(con);
+	list_t *siblings = NULL;
+	enum sway_container_layout layout = L_NONE;
+	float alpha = con->alpha;
+
+	if (con->current.parent) {
+		siblings = con->current.parent->current.children;
+		layout = con->current.parent->current.layout;
+	} else if (con->current.workspace) {
+		siblings = con->current.workspace->current.tiling;
+		layout = con->current.workspace->current.layout;
+	}
+
+	float bottom[4], right[4];
+	memcpy(bottom, colors->child_border, sizeof(bottom));
+	memcpy(right, colors->child_border, sizeof(right));
+
+	if (!container_is_current_floating(con) && siblings && siblings->length == 1) {
+		if (layout == L_HORIZ) {
+			memcpy(right, colors->indicator, sizeof(right));
+		} else if (layout == L_VERT) {
+			memcpy(bottom, colors->indicator, sizeof(bottom));
+		}
+	}
+
+	scene_rect_set_color(con->title_bar.background, colors->background, alpha);
+	scene_rect_set_color(con->title_bar.border, colors->border, alpha);
+
+	if (con->view) {
+		scene_rect_set_color(con->border.top, colors->child_border, alpha);
+		scene_rect_set_color(con->border.bottom, bottom, alpha);
+		scene_rect_set_color(con->border.left, colors->child_border, alpha);
+		scene_rect_set_color(con->border.right, right, alpha);
+	}
+
+	if (con->title_bar.title_text) {
+		sway_text_node_set_color(con->title_bar.title_text, colors->text);
+		sway_text_node_set_background(con->title_bar.title_text, colors->background);
+	}
+
+	if (con->title_bar.marks_text) {
+		sway_text_node_set_color(con->title_bar.marks_text, colors->text);
+		sway_text_node_set_background(con->title_bar.marks_text, colors->background);
+	}
+
+	if (con->dim_rect) {
+		float *color = config->dim_inactive_colors.unfocused;
+
+		// Urgency
+		if (con->view && view_is_urgent(con->view)) {
+			color = config->dim_inactive_colors.urgent;
+		}
+		// Focused
+		struct sway_container *active_child;
+		if (con->current.parent) {
+			active_child = con->current.parent->current.focused_inactive_child;
+		} else if (con->current.workspace) {
+			active_child = con->current.workspace->current.focused_inactive_child;
+		} else {
+			active_child = NULL;
+		}
+		bool focused = con->current.focused || container_is_current_parent_focused(con) || con == active_child;
+
+		scene_rect_set_color(con->dim_rect, color, focused ? 0.0 : con->dim);
+	}
+}
+
+void container_update_itself_and_parents(struct sway_container *con) {
+	container_update(con);
+
+	if (con->current.parent) {
+		container_update_itself_and_parents(con->current.parent);
+	}
+}
+
+void container_arrange_title_bar(struct sway_container *con) {
+	enum alignment title_align = config->title_align;
+	int marks_buffer_width = 0;
+	int width = con->title_width;
+	int height = container_titlebar_height();
+
+
+	struct wlr_box text_box = { 0, 0, 0, 0 };
+
+	if (con->title_bar.marks_text) {
+		struct sway_text_node *node = con->title_bar.marks_text;
+		marks_buffer_width = node->width;
+
+		int h_padding;
+		if (title_align == ALIGN_RIGHT) {
+			h_padding = config->titlebar_h_padding;
+		} else {
+			h_padding = width - config->titlebar_h_padding - marks_buffer_width;
+		}
+
+		h_padding = MAX(h_padding, config->titlebar_h_padding);
+
+		int alloc_width = MIN((int)node->width,
+			width - h_padding - config->titlebar_h_padding);
+		alloc_width = MAX(alloc_width, 0);
+
+		sway_text_node_set_max_width(node, alloc_width);
+		wlr_scene_node_set_position(node->node,
+			h_padding, (height - node->height) >> 1);
+
+		text_box.x = node->node->x;
+		text_box.y = node->node->y;
+		text_box.width = alloc_width;
+		text_box.height = node->height;
+	}
+
+	if (con->title_bar.title_text) {
+		struct sway_text_node *node = con->title_bar.title_text;
+
+		int h_padding;
+		if (title_align == ALIGN_RIGHT) {
+			h_padding = width - config->titlebar_h_padding - node->width;
+		} else if (title_align == ALIGN_CENTER) {
+			h_padding = ((int)width - marks_buffer_width - node->width) >> 1;
+		} else {
+			h_padding = config->titlebar_h_padding;
+		}
+
+		h_padding = MAX(h_padding, config->titlebar_h_padding);
+
+		int alloc_width = MIN((int) node->width,
+			width - h_padding - config->titlebar_h_padding);
+		alloc_width = MAX(alloc_width, 0);
+
+		sway_text_node_set_max_width(node, alloc_width);
+		wlr_scene_node_set_position(node->node,
+			h_padding, (height - node->height) >> 1);
+
+		text_box.x = MAX(text_box.x, node->node->x);
+		text_box.y = MAX(text_box.y, node->node->y);
+		text_box.width = MAX(text_box.width, alloc_width);
+		text_box.height = MAX(text_box.height, node->height);
+	}
+
+	if (width <= 0 || height <= 0) {
+		return;
+	}
+
+	enum corner_location corners = CORNER_LOCATION_TOP;
+	if (con->current.parent) {
+		list_t *siblings = con->current.parent->current.children;
+		if (con->current.parent->current.layout == L_TABBED && siblings->length > 1) {
+			if (siblings->items[0] == con) {
+				corners = CORNER_LOCATION_TOP_LEFT;
+			} else if (siblings->items[siblings->length - 1] == con) {
+				corners = CORNER_LOCATION_TOP_RIGHT;
+			} else {
+				corners = CORNER_LOCATION_NONE;
+			}
+		} else if (con->current.parent->current.layout == L_STACKED &&
+				siblings->items[0] != con) {
+			corners = CORNER_LOCATION_NONE;
+		}
+	}
+
+	bool has_corner_radius = container_has_corner_radius(con);
+	int thickness = config->titlebar_border_thickness;
+	wlr_scene_node_set_position(&con->title_bar.background->node, thickness, thickness);
+	wlr_scene_rect_set_size(con->title_bar.background, width - thickness * 2,
+			height - thickness * (config->titlebar_separator ? 2 : 1));
+	wlr_scene_rect_set_corner_radius(con->title_bar.background, !has_corner_radius ? 0 :
+			con->corner_radius + con->current.border_thickness - thickness, corners);
+
+	wlr_scene_rect_set_clipped_region(con->title_bar.background, (struct clipped_region) {
+			.corner_radius = 0,
+			.corners = CORNER_LOCATION_NONE,
+			.area = {
+				.x = text_box.x,
+				.y = text_box.y,
+				.width = text_box.width - thickness,
+				.height = text_box.height - thickness,
+			},
+	});
+
+	wlr_scene_rect_set_size(con->title_bar.border, width, height);
+	wlr_scene_rect_set_corner_radius(con->title_bar.border, !has_corner_radius ? 0 :
+			con->corner_radius + con->current.border_thickness, corners);
+
+	container_update(con);
+}
+
+void container_update_marks(struct sway_container *con) {
+	char *buffer = NULL;
+
+	if (config->show_marks && con->marks->length) {
+		size_t len = 0;
+		for (int i = 0; i < con->marks->length; ++i) {
+			char *mark = con->marks->items[i];
+			if (mark[0] != '_') {
+				len += strlen(mark) + 2;
+			}
+		}
+		buffer = calloc(len + 1, 1);
+		char *part = malloc(len + 1);
+
+		if (!sway_assert(buffer && part, "Unable to allocate memory")) {
+			free(buffer);
+			return;
+		}
+
+		for (int i = 0; i < con->marks->length; ++i) {
+			char *mark = con->marks->items[i];
+			if (mark[0] != '_') {
+				snprintf(part, len + 1, "[%s]", mark);
+				strcat(buffer, part);
+			}
+		}
+		free(part);
+	}
+
+	if (!buffer) {
+		if (con->title_bar.marks_text) {
+			wlr_scene_node_destroy(con->title_bar.marks_text->node);
+			con->title_bar.marks_text = NULL;
+		}
+	} else if (!con->title_bar.marks_text) {
+		struct border_colors *colors = container_get_current_colors(con);
+
+		con->title_bar.marks_text = sway_text_node_create(con->title_bar.tree,
+			buffer, colors->text, false);
+	} else {
+		sway_text_node_set_text(con->title_bar.marks_text, buffer);
+	}
+
+	container_arrange_title_bar(con);
+	free(buffer);
+}
+
+void container_update_title_bar(struct sway_container *con) {
+	if (!con->formatted_title) {
+		return;
+	}
+
+	struct border_colors *colors = container_get_current_colors(con);
+
+	if (con->title_bar.title_text) {
+		wlr_scene_node_destroy(con->title_bar.title_text->node);
+		con->title_bar.title_text = NULL;
+	}
+
+	con->title_bar.title_text = sway_text_node_create(con->title_bar.tree,
+		con->formatted_title, colors->text, config->pango_markup);
+
+	// we always have to remake these text buffers completely for text font
+	// changes etc...
+	if (con->title_bar.marks_text) {
+		wlr_scene_node_destroy(con->title_bar.marks_text->node);
+		con->title_bar.marks_text = NULL;
+	}
+
+	container_update_marks(con);
+	container_arrange_title_bar(con);
 }
 
 void container_destroy(struct sway_container *con) {
@@ -67,29 +519,22 @@ void container_destroy(struct sway_container *con) {
 	}
 	free(con->title);
 	free(con->formatted_title);
-	wlr_texture_destroy(con->title_focused);
-	wlr_texture_destroy(con->title_focused_inactive);
-	wlr_texture_destroy(con->title_unfocused);
-	wlr_texture_destroy(con->title_urgent);
-	wlr_texture_destroy(con->title_focused_tab_title);
+	free(con->title_format);
 	list_free(con->pending.children);
 	list_free(con->current.children);
-	list_free(con->outputs);
 
 	list_free_items_and_destroy(con->marks);
-	wlr_texture_destroy(con->marks_focused);
-	wlr_texture_destroy(con->marks_focused_inactive);
-	wlr_texture_destroy(con->marks_unfocused);
-	wlr_texture_destroy(con->marks_urgent);
-	wlr_texture_destroy(con->marks_focused_tab_title);
 
 	if (con->view && con->view->container == con) {
 		con->view->container = NULL;
+		wlr_scene_node_destroy(&con->output_handler->node);
 		if (con->view->destroying) {
 			view_destroy(con->view);
 		}
 	}
 
+	scene_node_disown_children(con->content_tree);
+	wlr_scene_node_destroy(&con->scene_tree->node);
 	free(con);
 }
 
@@ -176,268 +621,6 @@ struct sway_container *container_find_child(struct sway_container *container,
 	return NULL;
 }
 
-static struct sway_container *surface_at_view(struct sway_container *con, double lx, double ly,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	if (!sway_assert(con->view, "Expected a view")) {
-		return NULL;
-	}
-	struct sway_view *view = con->view;
-	double view_sx = lx - con->surface_x + view->geometry.x;
-	double view_sy = ly - con->surface_y + view->geometry.y;
-
-	double _sx, _sy;
-	struct wlr_surface *_surface = NULL;
-	switch (view->type) {
-#if HAVE_XWAYLAND
-	case SWAY_VIEW_XWAYLAND:
-		_surface = wlr_surface_surface_at(view->surface,
-				view_sx, view_sy, &_sx, &_sy);
-		break;
-#endif
-	case SWAY_VIEW_XDG_SHELL:
-		_surface = wlr_xdg_surface_surface_at(
-				view->wlr_xdg_toplevel->base,
-				view_sx, view_sy, &_sx, &_sy);
-		break;
-	}
-	if (_surface) {
-		*sx = _sx;
-		*sy = _sy;
-		*surface = _surface;
-		return con;
-	}
-	return NULL;
-}
-
-/**
- * container_at for a container with layout L_TABBED.
- */
-static struct sway_container *container_at_tabbed(struct sway_node *parent,
-		double lx, double ly,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	struct wlr_box box;
-	node_get_box(parent, &box);
-	if (lx < box.x || lx > box.x + box.width ||
-			ly < box.y || ly > box.y + box.height) {
-		return NULL;
-	}
-	struct sway_seat *seat = input_manager_current_seat();
-	list_t *children = node_get_children(parent);
-	if (!children->length) {
-		return NULL;
-	}
-
-	// Tab titles
-	int title_height = container_titlebar_height();
-	if (ly < box.y + title_height) {
-		int tab_width = box.width / children->length;
-		int child_index = (lx - box.x) / tab_width;
-		if (child_index >= children->length) {
-			child_index = children->length - 1;
-		}
-		struct sway_container *child = children->items[child_index];
-		return child;
-	}
-
-	// Surfaces
-	struct sway_node *current = seat_get_active_tiling_child(seat, parent);
-	return current ? tiling_container_at(current, lx, ly, surface, sx, sy) : NULL;
-}
-
-/**
- * container_at for a container with layout L_STACKED.
- */
-static struct sway_container *container_at_stacked(struct sway_node *parent,
-		double lx, double ly,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	struct wlr_box box;
-	node_get_box(parent, &box);
-	if (lx < box.x || lx > box.x + box.width ||
-			ly < box.y || ly > box.y + box.height) {
-		return NULL;
-	}
-	struct sway_seat *seat = input_manager_current_seat();
-	list_t *children = node_get_children(parent);
-
-	// Title bars
-	int title_height = container_titlebar_height();
-	if (title_height > 0) {
-		int child_index = (ly - box.y) / title_height;
-		if (child_index < children->length) {
-			struct sway_container *child = children->items[child_index];
-			return child;
-		}
-	}
-
-	// Surfaces
-	struct sway_node *current = seat_get_active_tiling_child(seat, parent);
-	return current ? tiling_container_at(current, lx, ly, surface, sx, sy) : NULL;
-}
-
-/**
- * container_at for a container with layout L_HORIZ or L_VERT.
- */
-static struct sway_container *container_at_linear(struct sway_node *parent,
-		double lx, double ly,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	list_t *children = node_get_children(parent);
-	for (int i = 0; i < children->length; ++i) {
-		struct sway_container *child = children->items[i];
-		struct sway_container *container =
-			tiling_container_at(&child->node, lx, ly, surface, sx, sy);
-		if (container) {
-			return container;
-		}
-	}
-	return NULL;
-}
-
-static struct sway_container *floating_container_at(double lx, double ly,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	// For outputs with floating containers that overhang the output bounds,
-	// those at the end of the output list appear on top of floating
-	// containers from other outputs, so iterate the list in reverse.
-	for (int i = root->outputs->length - 1; i >= 0; --i) {
-		struct sway_output *output = root->outputs->items[i];
-		for (int j = 0; j < output->workspaces->length; ++j) {
-			struct sway_workspace *ws = output->workspaces->items[j];
-			if (!workspace_is_visible(ws)) {
-				continue;
-			}
-			// Items at the end of the list are on top, so iterate the list in
-			// reverse.
-			for (int k = ws->floating->length - 1; k >= 0; --k) {
-				struct sway_container *floater = ws->floating->items[k];
-				struct sway_container *container =
-					tiling_container_at(&floater->node, lx, ly, surface, sx, sy);
-				if (container) {
-					return container;
-				}
-			}
-		}
-	}
-	return NULL;
-}
-
-static struct sway_container *view_container_content_at(struct sway_node *parent,
-		double lx, double ly,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	if (!sway_assert(node_is_view(parent), "Expected a view")) {
-		return NULL;
-	}
-
-	struct sway_container *container = parent->sway_container;
-	struct wlr_box box = {
-		.x = container->pending.content_x,
-		.y = container->pending.content_y,
-		.width = container->pending.content_width,
-		.height = container->pending.content_height,
-	};
-
-	if (wlr_box_contains_point(&box, lx, ly)) {
-		surface_at_view(parent->sway_container, lx, ly, surface, sx, sy);
-		return container;
-	}
-
-	return NULL;
-}
-
-static struct sway_container *view_container_at(struct sway_node *parent,
-		double lx, double ly,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	if (!sway_assert(node_is_view(parent), "Expected a view")) {
-		return NULL;
-	}
-
-	struct sway_container *container = parent->sway_container;
-	struct wlr_box box = {
-		.x = container->pending.x,
-		.y = container->pending.y,
-		.width = container->pending.width,
-		.height = container->pending.height,
-	};
-
-	if (wlr_box_contains_point(&box, lx, ly)) {
-		surface_at_view(parent->sway_container, lx, ly, surface, sx, sy);
-		return container;
-	}
-
-	return NULL;
-}
-
-struct sway_container *tiling_container_at(struct sway_node *parent,
-		double lx, double ly,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	if (node_is_view(parent)) {
-		return view_container_at(parent, lx, ly, surface, sx, sy);
-	}
-	if (!node_get_children(parent)) {
-		return NULL;
-	}
-	switch (node_get_layout(parent)) {
-	case L_HORIZ:
-	case L_VERT:
-		return container_at_linear(parent, lx, ly, surface, sx, sy);
-	case L_TABBED:
-		return container_at_tabbed(parent, lx, ly, surface, sx, sy);
-	case L_STACKED:
-		return container_at_stacked(parent, lx, ly, surface, sx, sy);
-	case L_NONE:
-		return NULL;
-	}
-	return NULL;
-}
-
-static bool surface_is_popup(struct wlr_surface *surface) {
-	while (wlr_xdg_surface_try_from_wlr_surface(surface) == NULL) {
-		struct wlr_subsurface *subsurface =
-			wlr_subsurface_try_from_wlr_surface(surface);
-		if (subsurface == NULL) {
-			return false;
-		}
-		surface = subsurface->parent;
-	}
-	if (wlr_input_popup_surface_v2_try_from_wlr_surface(surface) != NULL) {
-		return true;
-	}
-	struct wlr_xdg_surface *xdg_surface =
-		wlr_xdg_surface_try_from_wlr_surface(surface);
-	return xdg_surface->role == WLR_XDG_SURFACE_ROLE_POPUP && xdg_surface->popup != NULL;
-}
-
-struct sway_container *container_at(struct sway_workspace *workspace,
-		double lx, double ly,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	struct sway_container *c;
-
-	struct sway_seat *seat = input_manager_current_seat();
-	struct sway_container *focus = seat_get_focused_container(seat);
-	bool is_floating = focus && container_is_floating_or_child(focus);
-	// Focused view's popups
-	if (focus && focus->view) {
-		c = surface_at_view(focus, lx, ly, surface, sx, sy);
-		if (c && surface_is_popup(*surface)) {
-			return c;
-		}
-		*surface = NULL;
-	}
-	// Floating
-	if ((c = floating_container_at(lx, ly, surface ,sx ,sy))) {
-		return c;
-	}
-	// Tiling (focused)
-	if (focus && focus->view && !is_floating) {
-		if ((c = view_container_content_at(&focus->node, lx, ly, surface, sx, sy))) {
-			return c;
-		}
-	}
-	// Tiling (non-focused)
-	if ((c = tiling_container_at(&workspace->node, lx, ly, surface, sx, sy))) {
-		return c;
-	}
-	return NULL;
-}
-
 void container_for_each_child(struct sway_container *container,
 		void (*f)(struct sway_container *container, void *data),
 		void *data) {
@@ -483,124 +666,89 @@ bool container_has_ancestor(struct sway_container *descendant,
 	return false;
 }
 
-void container_damage_whole(struct sway_container *container) {
-	for (int i = 0; i < root->outputs->length; ++i) {
-		struct sway_output *output = root->outputs->items[i];
-		output_damage_whole_container(output, container);
+static char *escape_pango_markup(const char *buffer) {
+	size_t length = escape_markup_text(buffer, NULL);
+	char *escaped_title = calloc(length + 1, sizeof(char));
+	escape_markup_text(buffer, escaped_title);
+	return escaped_title;
+}
+
+static size_t append_prop(char *buffer, const char *value) {
+	if (!value) {
+		return 0;
+	}
+	// If using pango_markup in font, we need to escape all markup chars
+	// from values to make sure tags are not inserted by clients
+	if (config->pango_markup) {
+		char *escaped_value = escape_pango_markup(value);
+		lenient_strcat(buffer, escaped_value);
+		size_t len = strlen(escaped_value);
+		free(escaped_value);
+		return len;
+	} else {
+		lenient_strcat(buffer, value);
+		return strlen(value);
 	}
 }
 
 /**
- * Return the output which will be used for scale purposes.
- * This is the most recently entered output.
+ * Calculate and return the length of the formatted title.
+ * If buffer is not NULL, also populate the buffer with the formatted title.
  */
-struct sway_output *container_get_effective_output(struct sway_container *con) {
-	if (con->outputs->length == 0) {
-		return NULL;
-	}
-	return con->outputs->items[con->outputs->length - 1];
-}
-
-static void render_titlebar_text_texture(struct sway_output *output,
-		struct sway_container *con, struct wlr_texture **texture,
-		struct border_colors *class, bool pango_markup, char *text) {
-	double scale = output->wlr_output->scale;
-	int width = 0;
-	int height = config->font_height * scale;
-	int baseline;
-
-	// We must use a non-nil cairo_t for cairo_set_font_options to work.
-	// Therefore, we cannot use cairo_create(NULL).
-	cairo_surface_t *dummy_surface = cairo_image_surface_create(
-			CAIRO_FORMAT_ARGB32, 0, 0);
-	cairo_t *c = cairo_create(dummy_surface);
-	cairo_set_antialias(c, CAIRO_ANTIALIAS_BEST);
-	cairo_font_options_t *fo = cairo_font_options_create();
-	if (output->wlr_output->subpixel == WL_OUTPUT_SUBPIXEL_NONE) {
-		cairo_font_options_set_antialias(fo, CAIRO_ANTIALIAS_GRAY);
-	} else {
-		cairo_font_options_set_antialias(fo, CAIRO_ANTIALIAS_SUBPIXEL);
-		cairo_font_options_set_subpixel_order(fo,
-			to_cairo_subpixel_order(output->wlr_output->subpixel));
-	}
-	cairo_set_font_options(c, fo);
-	get_text_size(c, config->font_description, &width, NULL, &baseline, scale,
-			config->pango_markup, "%s", text);
-	cairo_surface_destroy(dummy_surface);
-	cairo_destroy(c);
-
-	if (width == 0 || height == 0) {
-		return;
+size_t parse_title_format(struct sway_container *container, char *buffer) {
+	if (!container->title_format || strcmp(container->title_format, "%title") == 0) {
+		if (container->view) {
+			return append_prop(buffer, view_get_title(container->view));
+		} else {
+			return container_build_representation(container->pending.layout, container->pending.children, buffer);
+		}
 	}
 
-	if (height > config->font_height * scale) {
-		height = config->font_height * scale;
+	size_t len = 0;
+	char *format = container->title_format;
+	char *next = strchr(format, '%');
+	while (next) {
+		// Copy everything up to the %
+		lenient_strncat(buffer, format, next - format);
+		len += next - format;
+		format = next;
+
+		if (strncmp(next, "%title", 6) == 0) {
+			if (container->view) {
+				len += append_prop(buffer, view_get_title(container->view));
+			} else {
+				len += container_build_representation(container->pending.layout, container->pending.children, buffer);
+			}
+			format += 6;
+		} else if (container->view) {
+			if (strncmp(next, "%app_id", 7) == 0) {
+				len += append_prop(buffer, view_get_app_id(container->view));
+				format += 7;
+			} else if (strncmp(next, "%class", 6) == 0) {
+				len += append_prop(buffer, view_get_class(container->view));
+				format += 6;
+			} else if (strncmp(next, "%instance", 9) == 0) {
+				len += append_prop(buffer, view_get_instance(container->view));
+				format += 9;
+			} else if (strncmp(next, "%shell", 6) == 0) {
+				len += append_prop(buffer, view_get_shell(container->view));
+				format += 6;
+			} else {
+				lenient_strcat(buffer, "%");
+				++format;
+				++len;
+			}
+		} else {
+			lenient_strcat(buffer, "%");
+			++format;
+			++len;
+		}
+		next = strchr(format, '%');
 	}
+	lenient_strcat(buffer, format);
+	len += strlen(format);
 
-	cairo_surface_t *surface = cairo_image_surface_create(
-			CAIRO_FORMAT_ARGB32, width, height);
-	cairo_status_t status = cairo_surface_status(surface);
-	if (status != CAIRO_STATUS_SUCCESS) {
-		sway_log(SWAY_ERROR, "cairo_image_surface_create failed: %s",
-			cairo_status_to_string(status));
-		return;
-	}
-
-	cairo_t *cairo = cairo_create(surface);
-	cairo_set_antialias(cairo, CAIRO_ANTIALIAS_BEST);
-	cairo_set_font_options(cairo, fo);
-	cairo_font_options_destroy(fo);
-	cairo_set_source_rgba(cairo, class->background[0], class->background[1],
-			class->background[2], class->background[3]);
-	cairo_paint(cairo);
-	PangoContext *pango = pango_cairo_create_context(cairo);
-	cairo_set_source_rgba(cairo, class->text[0], class->text[1],
-			class->text[2], class->text[3]);
-	cairo_move_to(cairo, 0, config->font_baseline * scale - baseline);
-
-	render_text(cairo, config->font_description, scale, pango_markup, "%s", text);
-
-	cairo_surface_flush(surface);
-	unsigned char *data = cairo_image_surface_get_data(surface);
-	int stride = cairo_image_surface_get_stride(surface);
-	struct wlr_renderer *renderer = output->wlr_output->renderer;
-	*texture = wlr_texture_from_pixels(
-			renderer, DRM_FORMAT_ARGB8888, stride, width, height, data);
-	cairo_surface_destroy(surface);
-	g_object_unref(pango);
-	cairo_destroy(cairo);
-}
-
-static void update_title_texture(struct sway_container *con,
-		struct wlr_texture **texture, struct border_colors *class) {
-	struct sway_output *output = container_get_effective_output(con);
-	if (!output) {
-		return;
-	}
-	if (*texture) {
-		wlr_texture_destroy(*texture);
-		*texture = NULL;
-	}
-	if (!con->formatted_title) {
-		return;
-	}
-
-	render_titlebar_text_texture(output, con, texture, class,
-		config->pango_markup, con->formatted_title);
-}
-
-void container_update_title_textures(struct sway_container *container) {
-	update_title_texture(container, &container->title_focused,
-			&config->border_colors.focused);
-	update_title_texture(container, &container->title_focused_inactive,
-			&config->border_colors.focused_inactive);
-	update_title_texture(container, &container->title_unfocused,
-			&config->border_colors.unfocused);
-	update_title_texture(container, &container->title_urgent,
-			&config->border_colors.urgent);
-	update_title_texture(container, &container->title_focused_tab_title,
-			&config->border_colors.focused_tab_title);
-	container_damage_whole(container);
+	return len;
 }
 
 /**
@@ -658,17 +806,21 @@ size_t container_build_representation(enum sway_container_layout layout,
 
 void container_update_representation(struct sway_container *con) {
 	if (!con->view) {
-		size_t len = container_build_representation(con->pending.layout,
-				con->pending.children, NULL);
+		size_t len = parse_title_format(con, NULL);
 		free(con->formatted_title);
 		con->formatted_title = calloc(len + 1, sizeof(char));
 		if (!sway_assert(con->formatted_title,
 					"Unable to allocate title string")) {
 			return;
 		}
-		container_build_representation(con->pending.layout, con->pending.children,
-				con->formatted_title);
-		container_update_title_textures(con);
+		parse_title_format(con, con->formatted_title);
+
+		if (con->title_bar.title_text) {
+			sway_text_node_set_text(con->title_bar.title_text, con->formatted_title);
+			container_arrange_title_bar(con);
+		} else {
+			container_update_title_bar(con);
+		}
 	}
 	if (con->pending.parent) {
 		container_update_representation(con->pending.parent);
@@ -725,11 +877,11 @@ void floating_fix_coordinates(struct sway_container *con, struct wlr_box *old, s
 		// Fall back to centering on the workspace.
 		container_floating_move_to_center(con);
 	} else {
-		int rel_x = con->pending.x - old->x + (con->pending.width / 2);
-		int rel_y = con->pending.y - old->y + (con->pending.height / 2);
+		double rel_x = con->pending.x - old->x + (con->pending.width / 2);
+		double rel_y = con->pending.y - old->y + (con->pending.height / 2);
 
-		con->pending.x = new->x + (double)(rel_x * new->width) / old->width - (con->pending.width / 2);
-		con->pending.y = new->y + (double)(rel_y * new->height) / old->height - (con->pending.height / 2);
+		con->pending.x = new->x + (rel_x * new->width) / old->width - (con->pending.width / 2);
+		con->pending.y = new->y + (rel_y * new->height) / old->height - (con->pending.height / 2);
 
 		sway_log(SWAY_DEBUG, "Transformed container %p to coords (%f, %f)", con, con->pending.x, con->pending.y);
 	}
@@ -954,17 +1106,6 @@ bool container_is_floating(struct sway_container *container) {
 	return false;
 }
 
-bool container_is_current_floating(struct sway_container *container) {
-	if (!container->current.parent && container->current.workspace &&
-			list_find(container->current.workspace->floating, container) != -1) {
-		return true;
-	}
-	if (container->scratchpad) {
-		return true;
-	}
-	return false;
-}
-
 void container_get_box(struct sway_container *container, struct wlr_box *box) {
 	box->x = container->pending.x;
 	box->y = container->pending.y;
@@ -1097,34 +1238,6 @@ static void set_fullscreen(struct sway_container *con, bool enable) {
 				con->view->foreign_toplevel, enable);
 		}
 	}
-
-	if (!server.linux_dmabuf_v1 || !con->view->surface) {
-		return;
-	}
-	if (!enable) {
-		wlr_linux_dmabuf_v1_set_surface_feedback(server.linux_dmabuf_v1,
-			con->view->surface, NULL);
-		return;
-	}
-
-	if (!con->pending.workspace || !con->pending.workspace->output) {
-		return;
-	}
-
-	struct sway_output *output = con->pending.workspace->output;
-	const struct wlr_linux_dmabuf_feedback_v1_init_options options = {
-		.main_renderer = server.renderer,
-		.scanout_primary_output = output->wlr_output,
-	};
-	struct wlr_linux_dmabuf_feedback_v1 feedback = {0};
-	if (!wlr_linux_dmabuf_feedback_v1_init_with_options(&feedback, &options)) {
- 		return;
- 	}
-
-	wlr_linux_dmabuf_v1_set_surface_feedback(server.linux_dmabuf_v1,
-		con->view->surface, &feedback);
-
-	wlr_linux_dmabuf_feedback_v1_finish(&feedback);
 }
 
 static void container_fullscreen_workspace(struct sway_container *con) {
@@ -1294,72 +1407,6 @@ bool container_is_fullscreen_or_child(struct sway_container *container) {
 	return false;
 }
 
-static void surface_send_enter_iterator(struct wlr_surface *surface,
-		int x, int y, void *data) {
-	struct sway_output *output = data;
-	surface_enter_output(surface, output);
-}
-
-static void surface_send_leave_iterator(struct wlr_surface *surface,
-		int x, int y, void *data) {
-	struct sway_output *output = data;
-	surface_leave_output(surface, output);
-}
-
-void container_discover_outputs(struct sway_container *con) {
-	struct wlr_box con_box = {
-		.x = con->current.x,
-		.y = con->current.y,
-		.width = con->current.width,
-		.height = con->current.height,
-	};
-	struct sway_output *old_output = container_get_effective_output(con);
-
-	for (int i = 0; i < root->outputs->length; ++i) {
-		struct sway_output *output = root->outputs->items[i];
-		struct wlr_box output_box;
-		output_get_box(output, &output_box);
-		struct wlr_box intersection;
-		bool intersects =
-			wlr_box_intersection(&intersection, &con_box, &output_box);
-		int index = list_find(con->outputs, output);
-
-		if (intersects && index == -1) {
-			// Send enter
-			sway_log(SWAY_DEBUG, "Container %p entered output %p", con, output);
-			if (con->view) {
-				view_for_each_surface(con->view,
-						surface_send_enter_iterator, output);
-				if (con->view->foreign_toplevel) {
-					wlr_foreign_toplevel_handle_v1_output_enter(
-							con->view->foreign_toplevel, output->wlr_output);
-				}
-			}
-			list_add(con->outputs, output);
-		} else if (!intersects && index != -1) {
-			// Send leave
-			sway_log(SWAY_DEBUG, "Container %p left output %p", con, output);
-			if (con->view) {
-				view_for_each_surface(con->view,
-					surface_send_leave_iterator, output);
-				if (con->view->foreign_toplevel) {
-					wlr_foreign_toplevel_handle_v1_output_leave(
-							con->view->foreign_toplevel, output->wlr_output);
-				}
-			}
-			list_del(con->outputs, index);
-		}
-	}
-	struct sway_output *new_output = container_get_effective_output(con);
-	double old_scale = old_output && old_output->enabled ?
-		old_output->wlr_output->scale : -1;
-	double new_scale = new_output ? new_output->wlr_output->scale : -1;
-	if (old_scale != new_scale) {
-		container_update_title_textures(con);
-		container_update_marks_textures(con);
-	}
-}
-
 enum sway_container_layout container_parent_layout(struct sway_container *con) {
 	if (con->pending.parent) {
 		return con->pending.parent->pending.layout;
@@ -1368,14 +1415,6 @@ enum sway_container_layout container_parent_layout(struct sway_container *con) {
 		return con->pending.workspace->layout;
 	}
 	return L_NONE;
-}
-
-enum sway_container_layout container_current_parent_layout(
-		struct sway_container *con) {
-	if (con->current.parent) {
-		return con->current.parent->current.layout;
-	}
-	return con->current.workspace->current.layout;
 }
 
 list_t *container_get_siblings(struct sway_container *container) {
@@ -1393,13 +1432,6 @@ list_t *container_get_siblings(struct sway_container *container) {
 
 int container_sibling_index(struct sway_container *child) {
 	return list_find(container_get_siblings(child), child);
-}
-
-list_t *container_get_current_siblings(struct sway_container *container) {
-	if (container->current.parent) {
-		return container->current.parent->current.children;
-	}
-	return container->current.workspace->current.tiling;
 }
 
 void container_handle_fullscreen_reparent(struct sway_container *con) {
@@ -1616,7 +1648,7 @@ bool container_find_and_unmark(char *mark) {
 		if (strcmp(con_mark, mark) == 0) {
 			free(con_mark);
 			list_del(con->marks, i);
-			container_update_marks_textures(con);
+			container_update_marks(con);
 			ipc_event_window(con, "mark");
 			return true;
 		}
@@ -1647,70 +1679,15 @@ void container_add_mark(struct sway_container *con, char *mark) {
 	ipc_event_window(con, "mark");
 }
 
-static void update_marks_texture(struct sway_container *con,
-		struct wlr_texture **texture, struct border_colors *class) {
-	struct sway_output *output = container_get_effective_output(con);
-	if (!output) {
-		return;
-	}
-	if (*texture) {
-		wlr_texture_destroy(*texture);
-		*texture = NULL;
-	}
-	if (!con->marks->length) {
-		return;
-	}
-
-	size_t len = 0;
-	for (int i = 0; i < con->marks->length; ++i) {
-		char *mark = con->marks->items[i];
-		if (mark[0] != '_') {
-			len += strlen(mark) + 2;
-		}
-	}
-	char *buffer = calloc(len + 1, 1);
-	char *part = malloc(len + 1);
-
-	if (!sway_assert(buffer && part, "Unable to allocate memory")) {
-		free(buffer);
-		return;
-	}
-
-	for (int i = 0; i < con->marks->length; ++i) {
-		char *mark = con->marks->items[i];
-		if (mark[0] != '_') {
-			snprintf(part, len + 1, "[%s]", mark);
-			strcat(buffer, part);
-		}
-	}
-	free(part);
-
-	render_titlebar_text_texture(output, con, texture, class, false, buffer);
-
-	free(buffer);
-}
-
-void container_update_marks_textures(struct sway_container *con) {
-	if (!config->show_marks) {
-		return;
-	}
-	update_marks_texture(con, &con->marks_focused,
-			&config->border_colors.focused);
-	update_marks_texture(con, &con->marks_focused_inactive,
-			&config->border_colors.focused_inactive);
-	update_marks_texture(con, &con->marks_unfocused,
-			&config->border_colors.unfocused);
-	update_marks_texture(con, &con->marks_urgent,
-			&config->border_colors.urgent);
-	update_marks_texture(con, &con->marks_focused_tab_title,
-			&config->border_colors.focused_tab_title);
-	container_damage_whole(con);
-}
-
 void container_raise_floating(struct sway_container *con) {
 	// Bring container to front by putting it at the end of the floating list.
 	struct sway_container *floater = container_toplevel_ancestor(con);
 	if (container_is_floating(floater) && floater->pending.workspace) {
+		// it's okay to just raise the scene directly instead of waiting
+		// for the transaction to go through. We won't be reconfiguring
+		// surfaces
+		wlr_scene_node_raise_to_top(&floater->scene_tree->node);
+
 		list_move_to_end(floater->pending.workspace->floating, floater);
 		node_set_dirty(&floater->pending.workspace->node);
 	}
@@ -1967,4 +1944,17 @@ void container_swap(struct sway_container *con1, struct sway_container *con2) {
 	if (fs2) {
 		container_set_fullscreen(con1, fs2);
 	}
+}
+
+bool container_has_shadow(struct sway_container *con) {
+	return con->shadow_enabled
+		&& (con->current.border != B_CSD || config->shadows_on_csd_enabled);
+}
+
+bool container_has_corner_radius(struct sway_container *con) {
+	if (!con) {
+		return false;
+	}
+	return container_is_floating_or_child(con)
+			|| !(config->smart_corner_radius && con->current.workspace->current_gaps.top == 0);
 }

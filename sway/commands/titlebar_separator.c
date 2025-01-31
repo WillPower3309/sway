@@ -1,7 +1,6 @@
 #include <string.h>
 #include <strings.h>
 #include "sway/commands.h"
-#include "util.h"
 
 struct cmd_results *cmd_titlebar_separator(int argc, char **argv) {
 	struct cmd_results *error = NULL;

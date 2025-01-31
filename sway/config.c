@@ -1,3 +1,4 @@
+#undef _POSIX_C_SOURCE
 #define _XOPEN_SOURCE 700 // for realpath
 #include <stdio.h>
 #include <stdbool.h>
@@ -23,6 +24,7 @@
 #include "sway/criteria.h"
 #include "sway/layer_criteria.h"
 #include "sway/desktop/transaction.h"
+#include "sway/server.h"
 #include "sway/swaynag.h"
 #include "sway/tree/arrange.h"
 #include "sway/tree/root.h"
@@ -37,19 +39,26 @@
 struct sway_config *config = NULL;
 
 static struct xkb_state *keysym_translation_state_create(
-		struct xkb_rule_names rules) {
-	struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_SECURE_GETENV);
+		struct xkb_rule_names rules, uint32_t context_flags) {
+	struct xkb_context *context = xkb_context_new(context_flags | XKB_CONTEXT_NO_SECURE_GETENV);
 	struct xkb_keymap *xkb_keymap = xkb_keymap_new_from_names(
 		context,
 		&rules,
 		XKB_KEYMAP_COMPILE_NO_FLAGS);
-
 	xkb_context_unref(context);
+	if (xkb_keymap == NULL) {
+		sway_log(SWAY_ERROR, "Failed to compile keysym translation XKB keymap");
+		return NULL;
+	}
+
 	return xkb_state_new(xkb_keymap);
 }
 
 static void keysym_translation_state_destroy(
 		struct xkb_state *state) {
+	if (state == NULL) {
+		return;
+	}
 	xkb_keymap_unref(xkb_state_get_keymap(state));
 	xkb_state_unref(state);
 }
@@ -345,9 +354,13 @@ static void config_defaults(struct sway_config *config) {
 	config->corner_radius = 0;
 	config->smart_corner_radius = true;
 
-	config->default_dim_inactive = 0.0f;
+	config->default_dim_inactive = 0.5f;
 	color_to_rgba(config->dim_inactive_colors.unfocused, 0x000000FF);
 	color_to_rgba(config->dim_inactive_colors.urgent, 0x900000FF);
+
+	config->blur_enabled = false;
+	config->blur_xray = false;
+	config->blur_data = blur_data_get_default();
 
 	config->shadow_enabled = false;
 	config->shadows_on_csd_enabled = false;
@@ -357,24 +370,23 @@ static void config_defaults(struct sway_config *config) {
 	color_to_rgba(config->shadow_color, 0x0000007F);
 	color_to_rgba(config->shadow_inactive_color, 0x0000007F);
 
-	config->blur_enabled = false;
-	config->blur_xray = false;
-	config->blur_params.num_passes = 2;
-	config->blur_params.radius = 5;
-	config->blur_params.noise = 0.02;
-	config->blur_params.brightness = 0.9;
-	config->blur_params.contrast = 0.9;
-	config->blur_params.saturation = 1.1;
-
 	config->titlebar_separator = true;
 	config->scratchpad_minimize = false;
 
-	if (!(config->layer_criteria = create_list())) goto cleanup;
+	if (!(config->layer_criteria = create_list())) {
+		goto cleanup;
+	}
 
 	// The keysym to keycode translation
 	struct xkb_rule_names rules = {0};
-	config->keysym_translation_state =
-		keysym_translation_state_create(rules);
+	config->keysym_translation_state = keysym_translation_state_create(rules, 0);
+	if (config->keysym_translation_state == NULL) {
+		config->keysym_translation_state = keysym_translation_state_create(rules,
+			XKB_CONTEXT_NO_ENVIRONMENT_NAMES);
+	}
+	if (config->keysym_translation_state == NULL) {
+		goto cleanup;
+	}
 
 	return;
 cleanup:
@@ -389,13 +401,7 @@ static char *config_path(const char *prefix, const char *config_folder) {
 	if (!prefix || !prefix[0] || !config_folder || !config_folder[0]) {
 		return NULL;
 	}
-
-	const char *filename = "config";
-
-	size_t size = 3 + strlen(prefix) + strlen(config_folder) + strlen(filename);
-	char *path = calloc(size, sizeof(char));
-	snprintf(path, size, "%s/%s/%s", prefix, config_folder, filename);
-	return path;
+	return format_str("%s/%s/config", prefix, config_folder);
 }
 
 static char *get_config_path(void) {
@@ -405,10 +411,7 @@ static char *get_config_path(void) {
 
 	const char *config_home = getenv("XDG_CONFIG_HOME");
 	if ((config_home == NULL || config_home[0] == '\0') && home != NULL) {
-		size_t size_fallback = 1 + strlen(home) + strlen("/.config");
-		config_home_fallback = calloc(size_fallback, sizeof(char));
-		if (config_home_fallback != NULL)
-			snprintf(config_home_fallback, size_fallback, "%s/.config", home);
+		config_home_fallback = format_str("%s/.config", home);
 		config_home = config_home_fallback;
 	}
 
@@ -536,56 +539,7 @@ bool load_main_config(const char *file, bool is_active, bool validating) {
 
 	config->reading = true;
 
-	// Read security configs
-	// TODO: Security
-	bool success = true;
-	/*
-	DIR *dir = opendir(SYSCONFDIR "/sway/security.d");
-	if (!dir) {
-		sway_log(SWAY_ERROR,
-			"%s does not exist, sway will have no security configuration"
-			" and will probably be broken", SYSCONFDIR "/sway/security.d");
-	} else {
-		list_t *secconfigs = create_list();
-		char *base = SYSCONFDIR "/sway/security.d/";
-		struct dirent *ent = readdir(dir);
-		struct stat s;
-		while (ent != NULL) {
-			char *_path = malloc(strlen(ent->d_name) + strlen(base) + 1);
-			strcpy(_path, base);
-			strcat(_path, ent->d_name);
-			lstat(_path, &s);
-			if (S_ISREG(s.st_mode) && ent->d_name[0] != '.') {
-				list_add(secconfigs, _path);
-			}
-			else {
-				free(_path);
-			}
-			ent = readdir(dir);
-		}
-		closedir(dir);
-
-		list_qsort(secconfigs, qstrcmp);
-		for (int i = 0; i < secconfigs->length; ++i) {
-			char *_path = secconfigs->items[i];
-			if (stat(_path, &s) || s.st_uid != 0 || s.st_gid != 0 ||
-					(((s.st_mode & 0777) != 0644) &&
-					(s.st_mode & 0777) != 0444)) {
-				sway_log(SWAY_ERROR,
-					"Refusing to load %s - it must be owned by root "
-					"and mode 644 or 444", _path);
-				success = false;
-			} else {
-				success = success && load_config(_path, config);
-			}
-		}
-
-		list_free_items_and_destroy(secconfigs);
-	}
-	*/
-
-	success = success && load_config(path, config,
-			&config->swaynag_config_errors);
+	bool success = load_config(path, config, &config->swaynag_config_errors);
 
 	if (validating) {
 		free_config(config);
@@ -596,7 +550,7 @@ bool load_main_config(const char *file, bool is_active, bool validating) {
 	// Only really necessary if not explicitly `font` is set in the config.
 	config_update_font_height();
 
-	if (is_active && !validating) {
+	if (!validating) {
 		input_manager_verify_fallback_seat();
 
 		for (int i = 0; i < config->input_configs->length; i++) {
@@ -613,12 +567,14 @@ bool load_main_config(const char *file, bool is_active, bool validating) {
 		}
 		sway_switch_retrigger_bindings_for_all();
 
-		reset_outputs();
 		spawn_swaybg();
 
 		config->reloading = false;
-		if (config->swaynag_config_errors.client != NULL) {
-			swaynag_show(&config->swaynag_config_errors);
+		if (is_active) {
+			request_modeset();
+			if (config->swaynag_config_errors.client != NULL) {
+				swaynag_show(&config->swaynag_config_errors);
+			}
 		}
 	}
 
@@ -1079,8 +1035,12 @@ void translate_keysyms(struct input_config *input_config) {
 
 	struct xkb_rule_names rules = {0};
 	input_config_fill_rule_names(input_config, &rules);
-	config->keysym_translation_state =
-		keysym_translation_state_create(rules);
+	config->keysym_translation_state = keysym_translation_state_create(rules, 0);
+	if (config->keysym_translation_state == NULL) {
+		sway_log(SWAY_ERROR, "Failed to create keysym translation XKB state "
+			"for device '%s'", input_config->identifier);
+		return;
+	}
 
 	for (int i = 0; i < config->modes->length; ++i) {
 		struct sway_mode *mode = config->modes->items[i];
@@ -1100,23 +1060,4 @@ void translate_keysyms(struct input_config *input_config) {
 
 	sway_log(SWAY_DEBUG, "Translated keysyms using config for device '%s'",
 			input_config->identifier);
-}
-
-int config_get_blur_size() {
-	return pow(2, config->blur_params.num_passes + 1) * config->blur_params.radius;
-}
-
-bool config_should_parameters_blur() {
-	return config->blur_params.radius > 0 && config->blur_params.num_passes > 0;
-}
-
-bool config_should_parameters_blur_effects() {
-	return config->blur_params.brightness != 1.0f
-		|| config->blur_params.saturation != 1.0f
-		|| config->blur_params.contrast != 1.0f
-		|| config->blur_params.noise > 0.0f;
-}
-
-bool config_should_parameters_shadow() {
-	return config->shadow_blur_sigma > 0 && config->shadow_color[3] > 0.0;
 }

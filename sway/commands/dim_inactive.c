@@ -1,7 +1,6 @@
 #include <string.h>
 #include "sway/commands.h"
 #include "sway/config.h"
-#include "log.h"
 #include "sway/output.h"
 #include "sway/tree/container.h"
 
@@ -18,10 +17,10 @@ struct cmd_results *cmd_dim_inactive(int argc, char **argv) {
 	}
 
 	struct sway_container *container = config->handler_context.container;
-    if (!container) {
-        return cmd_results_new(CMD_INVALID, "cmd_dim cannot be used without a for_window rule");
-    }
+	if (!container) {
+		return cmd_results_new(CMD_INVALID, "cmd_dim cannot be used without a for_window rule");
+	}
 
-    container->dim = val;
+	container->dim = val;
 	return cmd_results_new(CMD_SUCCESS, NULL);
 }

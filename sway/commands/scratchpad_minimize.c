@@ -1,8 +1,6 @@
 #include <string.h>
 #include "sway/commands.h"
 #include "sway/config.h"
-#include "log.h"
-#include "stringop.h"
 #include "util.h"
 
 struct cmd_results *cmd_scratchpad_minimize(int argc, char **argv) {

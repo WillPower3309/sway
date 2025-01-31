@@ -72,13 +72,11 @@ must be separated by one space. For example:
 
 *output* <name> scale <factor>
 	Scales the specified output by the specified scale _factor_. An integer is
-	recommended, but fractional values are also supported. If a fractional
-	value are specified, be warned that it is not possible to faithfully
-	represent the contents of your windows - they will be rendered at the next
-	highest integer scale factor and downscaled. You may be better served by
-	setting an integer scale factor and adjusting the font size of your
-	applications to taste. HiDPI isn't supported with Xwayland clients (windows
-	will blur).
+	recommended, but fractional values are also supported. You may be better
+	served by setting an integer scale factor and adjusting the font size of
+	your applications to taste. HiDPI isn't supported with Xwayland clients
+	(windows will blur). A fractional scale may be slightly adjusted to match
+	requirements of the protocol.
 
 *output* <name> scale_filter linear|nearest|smart
 	Indicates how to scale application buffers that are rendered at a scale
@@ -156,7 +154,7 @@ must be separated by one space. For example:
 	This setting only has an effect on Wayland and DRM backends, as support for
 	presentation timestamps and predicted output refresh rate is required.
 
-*output* <name> adaptive_sync on|off
+*output* <name> adaptive_sync on|off|toggle
 	Enables or disables adaptive synchronization (often referred to as Variable
 	Refresh Rate, or by the vendor-specific names FreeSync/G-Sync).
 
@@ -165,9 +163,9 @@ must be separated by one space. For example:
 	adaptive sync can improve latency, but can cause flickering on some
 	hardware.
 
-*output* <name> render_bit_depth 8|10
-	Controls the color channel bit depth at which frames are rendered; the
-	default is currently 8 bits per channel.
+*output* <name> render_bit_depth 6|8|10
+	Controls the maximum color channel bit depth at which frames are
+	rendered; the default is currently 8 bits per channel.
 
 	Setting higher values will not have an effect if hardware and software lack
 	support for such bit depths. Successfully increasing the render bit depth
@@ -179,6 +177,38 @@ must be separated by one space. For example:
 	Warnings: this can break screenshot/screencast programs which have not been
 	updated to work with different bit depths. This command is experimental,
 	and may be removed or changed in the future.
+
+*output* <name> color_profile srgb|[icc <file>]
+	Sets the color profile for an output. The default is _srgb_. <file> should be a
+	path to a display ICC profile.
+
+	Not all renderers support this feature; currently it only works with the
+	the Vulkan renderer. Even where supported, the application of the color
+	profile may be inaccurate.
+
+	This command is experimental, and may be removed or changed in the future. It
+	may have no effect or produce unexpected output when used together with future
+	HDR support features.
+
+*output* <name> allow_tearing yes|no
+	Allows or disallows screen tearing as a result of immediate page flips,
+	and an immediate presentation mode from a client. The default is that no
+	screen tearing is allowed.
+
+	With immediate page flips, frames from the client are presented as soon
+	as possible instead of synchronizing with the monitor's vblank interval 
+	(VSync). 
+	
+	It is recommended to set *max_render_time* to *off*. In that case a page flip
+	happens as soon as a client updates. Otherwise, tearing will only happen if
+	rendering takes longer than the configured milliseconds before the next
+	display refresh.
+
+	To adjust whether tearing is allowed for specific applications, see
+	*allow_tearing* in *sway*(5). Note that tearing will only be enabled
+	when it's allowed for both the output and the application.
+
+	This setting only has effect when a window is fullscreen on the output.
 
 # SEE ALSO
 

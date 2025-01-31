@@ -57,6 +57,7 @@ which you may only select one. *[...]* is used for optional arguments, and
 This section only lists general commands. For input and output commands, refer
 to *sway-input*(5) and *sway-output*(5).
 
+## Config only commands
 The following commands may only be used in the configuration file.
 
 *bar* [<bar-id>] <bar-subcommands...>
@@ -102,6 +103,7 @@ The following commands may only be used in the configuration file.
 	machines, it may be desirable to have Xwayland started immediately by
 	using _force_ instead of _enable_.
 
+## Runtime only commands
 The following commands cannot be used directly in the configuration file.
 They are expected to be used with *bindsym* or at runtime through *swaymsg*(1).
 
@@ -218,6 +220,20 @@ set|plus|minus|toggle <amount>
 	This setting only has an effect if a per-output *max_render_time* is in
 	effect on the output the window is currently on. See *sway-output*(5) for
 	further details.
+
+*allow_tearing* yes|no
+	Allows or disallows screen tearing as a result of immediate page flips
+	for a fullscreen application.
+
+	When this option is not set, the tearing hints provided by the application
+	determine whether tearing is allowed. When _yes_ is specified,
+	the application allows tearing regardless of the tearing hints.
+	When _no_ is specified, tearing will never be allowed on the application,
+	regardless of the tearing hints.
+
+	This setting only has an effect if tearing is allowed on the output through
+	the per-output *allow_tearing* setting. See *sway-output*(5) 
+	for further details.
 
 *move* left|right|up|down [<px> px]
 	Moves the focused container in the direction specified. The optional _px_
@@ -375,6 +391,7 @@ set|plus|minus|toggle <amount>
 
 	The default format is "%title".
 
+## Config or runtime commands
 The following commands may be used either in the configuration file or at
 runtime.
 
@@ -403,6 +420,12 @@ runtime.
 	generic to all devices. If a group number is given, then the binding will
 	only be available for that group. By default, if you overwrite a binding,
 	swaynag will give you a warning. To silence this, use the _--no-warn_ flag.
+
+	For specifying modifier keys, you can use the XKB modifier names _Shift_,
+	_Lock_ (for Caps Lock), _Control_, _Mod1_ (for Alt), _Mod2_ (for Num Lock),
+	_Mod3_ (for XKB modifier Mod3), _Mod4_ (for the Logo key), and _Mod5_ (for
+	AltGr). In addition, you can use the aliases  _Ctrl_ (for Control), _Alt_
+	(for Alt), and _Super_ (for the Logo key).
 
 	Unless the flag _--locked_ is set, the command will not be run when a
 	screen locking program is active. If there is a matching binding with
@@ -709,7 +732,7 @@ The default colors are:
 	while 5 is the default value.
 
 *blur_noise* <value>
-	Adjusts the percentage of noise applied to the blur between 0 and 1 
+	Adjusts the percentage of noise applied to the blur between 0 and 1
 	while 0.02 (2%) is the default value.
 
 *blur_brightness* <value>
@@ -819,17 +842,26 @@ The default colors are:
 
 	Effects:
 	- *blur* <enable|disable>
+	- *blur_xray* <enable|disable>
 	- *blur_ignore_transparent* <enable|disable>
 	- *shadows* <enable|disable>
 	- *corner_radius* <integer>
+	- *reset* Resets all previously applied effects
+	- *reset* To reset/disable all previously applied effects to the layer application
 
 	Example:
 
-		layer_effects "waybar" blur enable; shadows enable; corner_radius 6
+		layer_effects "waybar" {
+			blur enable;
+			blur_xray enable;
+			blur_ignore_transparent enable;
+			shadows enable;
+			corner_radius 6;
+		}
 
-	SwayIPC Example:
+	SwayIPC Example (you can only set one effect at a time through `swaymsg`):
 
-		swaymsg "layer_effects 'waybar' 'blur enable; shadows enable'"
+		swaymsg layer_effects "waybar" "blur enable"
 
 *gaps* inner|outer|horizontal|vertical|top|right|bottom|left <amount>
 	Sets default _amount_ pixels of _inner_ or _outer_ gap, where the inner
@@ -930,11 +962,6 @@ The default colors are:
 *opacity* [set|plus|minus] <value>
 	Adjusts the opacity of the window between 0 (completely transparent) and
 	1 (completely opaque). If the operation is omitted, _set_ will be used.
-
-*saturation* [set|plus|minus] <value>
-	Adjusts the saturation (Digital Vibrance) of the window between 0 (black and
-	white) and 2 (over saturated which is suited for some FPS games) while 1 is
-	the default saturation. If the operation is omitted, _set_ will be used.
 
 *tiling_drag*  enable|disable|toggle
 	Sets whether or not tiling containers can be dragged with the mouse. If
@@ -1144,4 +1171,3 @@ The following attributes may be matched with:
 # SEE ALSO
 
 *sway*(1) *sway-input*(5) *sway-output*(5) *sway-bar*(5) *sway-ipc*(7)
-

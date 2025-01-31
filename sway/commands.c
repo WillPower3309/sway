@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -50,7 +49,7 @@ static const struct cmd_handler handlers[] = {
 	{ "bindswitch", cmd_bindswitch },
 	{ "bindsym", cmd_bindsym },
 	{ "blur", cmd_blur },
-    { "blur_brightness", cmd_blur_brightness },
+	{ "blur_brightness", cmd_blur_brightness },
 	{ "blur_contrast", cmd_blur_contrast },
 	{ "blur_noise", cmd_blur_noise },
 	{ "blur_passes", cmd_blur_passes },
@@ -126,8 +125,8 @@ static const struct cmd_handler handlers[] = {
 static const struct cmd_handler config_handlers[] = {
 	{ "default_orientation", cmd_default_orientation },
 	{ "include", cmd_include },
-	{ "scratchpad_minimize", cmd_scratchpad_minimize },
 	{ "primary_selection", cmd_primary_selection },
+	{ "scratchpad_minimize", cmd_scratchpad_minimize },
 	{ "swaybg_command", cmd_swaybg_command },
 	{ "swaynag_command", cmd_swaynag_command },
 	{ "workspace_layout", cmd_workspace_layout },
@@ -136,6 +135,7 @@ static const struct cmd_handler config_handlers[] = {
 
 /* Runtime-only commands. Keep alphabetized */
 static const struct cmd_handler command_handlers[] = {
+	{ "allow_tearing", cmd_allow_tearing },
 	{ "border", cmd_border },
 	{ "create_output", cmd_create_output },
 	{ "exit", cmd_exit },
@@ -152,7 +152,6 @@ static const struct cmd_handler command_handlers[] = {
 	{ "reload", cmd_reload },
 	{ "rename", cmd_rename },
 	{ "resize", cmd_resize },
-	{ "saturation", cmd_saturation },
 	{ "scratchpad", cmd_scratchpad },
 	{ "shortcuts_inhibitor", cmd_shortcuts_inhibitor },
 	{ "split", cmd_split },

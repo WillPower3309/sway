@@ -1,8 +1,10 @@
 #include <string.h>
 #include "sway/commands.h"
 #include "sway/config.h"
+#include "sway/output.h"
+#include "sway/tree/arrange.h"
 #include "sway/tree/container.h"
-#include "log.h"
+#include "sway/tree/workspace.h"
 
 bool cmd_corner_radius_parse_value(char *arg, int* result) {
 	char *inv;
@@ -14,6 +16,11 @@ bool cmd_corner_radius_parse_value(char *arg, int* result) {
 	return true;
 }
 
+static void arrange_corner_radius_iter(struct sway_container *con, void *data) {
+	con->corner_radius = config->corner_radius;
+}
+
+// TODO: handle setting per container
 struct cmd_results *cmd_corner_radius(int argc, char **argv) {
 	struct cmd_results *error = NULL;
 	if ((error = checkarg(argc, "corner_radius", EXPECTED_EQUAL_TO, 1))) {
@@ -26,6 +33,12 @@ struct cmd_results *cmd_corner_radius(int argc, char **argv) {
 	}
 
 	config->corner_radius = value;
+
+	if (!config->handler_context.container) {
+		// Config reload: reset all containers to config value
+		root_for_each_container(arrange_corner_radius_iter, NULL);
+		arrange_root();
+	}
 
 	/*
 	 titlebar padding depends on corner_radius to

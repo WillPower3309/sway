@@ -1,8 +1,13 @@
-#include "scenefx/render/fx_renderer/fx_effect_framebuffers.h"
 #include "sway/commands.h"
 #include "sway/config.h"
 #include "sway/output.h"
+#include "sway/tree/arrange.h"
+#include "sway/tree/root.h"
 #include "util.h"
+
+static void arrange_blur_iter(struct sway_container *con, void *data) {
+	con->blur_enabled = config->blur_enabled;
+}
 
 struct cmd_results *cmd_blur(int argc, char **argv) {
 	struct cmd_results *error = checkarg(argc, "blur", EXPECTED_AT_LEAST, 1);
@@ -16,16 +21,19 @@ struct cmd_results *cmd_blur(int argc, char **argv) {
 	bool result = parse_boolean(argv[0], true);
 	if (con == NULL) {
 		config->blur_enabled = result;
+
+		// Config reload: reset all containers to config value
+		root_for_each_container(arrange_blur_iter, NULL);
+		arrange_root();
 	} else {
 		con->blur_enabled = result;
+		container_update(con);
 	}
 
 	struct sway_output *output;
 	wl_list_for_each(output, &root->all_outputs, link) {
-		struct fx_effect_framebuffers *effect_fbos =
-			fx_effect_framebuffers_try_get(output->wlr_output);
-		effect_fbos->blur_buffer_dirty = true;
-		output_damage_whole(output);
+		wlr_scene_optimized_blur_mark_dirty(root->root_scene,
+				output->layers.blur_layer, output->wlr_output);
 	}
 
 	return cmd_results_new(CMD_SUCCESS, NULL);

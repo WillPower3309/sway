@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <scenefx/render/fx_renderer/fx_renderer.h>
 #include <stdbool.h>
@@ -9,25 +8,32 @@
 #include <wlr/backend/headless.h>
 #include <wlr/backend/multi.h>
 #include <wlr/config.h>
-#include <wlr/render/gles2.h>
-#include <wlr/render/wlr_renderer.h>
+#include <wlr/render/allocator.h>
+#include <wlr/types/wlr_alpha_modifier_v1.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_content_type_v1.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>
 #include <wlr/types/wlr_data_control_v1.h>
+#include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_drm.h>
 #include <wlr/types/wlr_export_dmabuf_v1.h>
+#include <wlr/types/wlr_ext_foreign_toplevel_list_v1.h>
+#include <wlr/types/wlr_foreign_toplevel_management_v1.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_gamma_control_v1.h>
 #include <wlr/types/wlr_idle_notify_v1.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
+#include <wlr/types/wlr_output_management_v1.h>
+#include <wlr/types/wlr_output_power_management_v1.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
+#include <wlr/types/wlr_presentation_time.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_security_context_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
+#include <wlr/types/wlr_session_lock_v1.h>
 #include <wlr/types/wlr_single_pixel_buffer_v1.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_tablet_v2.h>
@@ -39,6 +45,7 @@
 #include <wlr/types/wlr_xdg_foreign_v1.h>
 #include <wlr/types/wlr_xdg_foreign_v2.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
+#include <xf86drm.h>
 #include "config.h"
 #include "list.h"
 #include "log.h"
@@ -50,7 +57,7 @@
 #include "sway/input/cursor.h"
 #include "sway/tree/root.h"
 
-#if HAVE_XWAYLAND
+#if WLR_HAS_XWAYLAND
 #include <wlr/xwayland/shell.h>
 #include "sway/xwayland.h"
 #endif
@@ -59,8 +66,11 @@
 #include <wlr/types/wlr_drm_lease_v1.h>
 #endif
 
-#define SWAY_XDG_SHELL_VERSION 2
+#define SWAY_XDG_SHELL_VERSION 5
 #define SWAY_LAYER_SHELL_VERSION 4
+#define SWAY_FOREIGN_TOPLEVEL_LIST_VERSION 1
+
+bool allow_unsupported_gpu = false;
 
 #if WLR_HAS_DRM_BACKEND
 static void handle_drm_lease_request(struct wl_listener *listener, void *data) {
@@ -92,6 +102,7 @@ static bool is_privileged(const struct wl_global *global) {
 		global == server.output_manager_v1->global ||
 		global == server.output_power_manager_v1->global ||
 		global == server.input_method->global ||
+		global == server.foreign_toplevel_list->global ||
 		global == server.foreign_toplevel_manager->global ||
 		global == server.data_control_manager_v1->global ||
 		global == server.screencopy_manager_v1->global ||
@@ -100,15 +111,16 @@ static bool is_privileged(const struct wl_global *global) {
 		global == server.gamma_control_manager_v1->global ||
 		global == server.layer_shell->global ||
 		global == server.session_lock.manager->global ||
-		global == server.input->inhibit->global ||
 		global == server.input->keyboard_shortcuts_inhibit->global ||
 		global == server.input->virtual_keyboard->global ||
-		global == server.input->virtual_pointer->global;
+		global == server.input->virtual_pointer->global ||
+		global == server.input->transient_seat_manager->global ||
+		global == server.xdg_output_manager_v1->global;
 }
 
 static bool filter_global(const struct wl_client *client,
 		const struct wl_global *global, void *data) {
-#if HAVE_XWAYLAND
+#if WLR_HAS_XWAYLAND
 	struct wlr_xwayland *xwayland = server.xwayland.wlr_xwayland;
 	if (xwayland && global == xwayland->shell_v1->global) {
 		return xwayland->server != NULL && client == xwayland->server->client;
@@ -127,6 +139,81 @@ static bool filter_global(const struct wl_client *client,
 	return true;
 }
 
+static void detect_proprietary(struct wlr_backend *backend, void *data) {
+	int drm_fd = wlr_backend_get_drm_fd(backend);
+	if (drm_fd < 0) {
+		return;
+	}
+
+	drmVersion *version = drmGetVersion(drm_fd);
+	if (version == NULL) {
+		sway_log(SWAY_ERROR, "drmGetVersion() failed");
+		return;
+	}
+
+	bool is_unsupported = false;
+	if (strcmp(version->name, "nvidia-drm") == 0) {
+		is_unsupported = true;
+		sway_log(SWAY_ERROR, "!!! Proprietary Nvidia drivers are in use !!!");
+		if (!allow_unsupported_gpu) {
+			sway_log(SWAY_ERROR, "Use Nouveau instead");
+		}
+	}
+
+	if (strcmp(version->name, "evdi") == 0) {
+		is_unsupported = true;
+		sway_log(SWAY_ERROR, "!!! Proprietary DisplayLink drivers are in use !!!");
+	}
+
+	if (!allow_unsupported_gpu && is_unsupported) {
+		sway_log(SWAY_ERROR,
+			"Proprietary drivers are NOT supported. To launch sway anyway, "
+			"launch with --unsupported-gpu and DO NOT report issues.");
+		exit(EXIT_FAILURE);
+	}
+
+	drmFreeVersion(version);
+}
+
+static void handle_renderer_lost(struct wl_listener *listener, void *data) {
+	struct sway_server *server = wl_container_of(listener, server, renderer_lost);
+
+	sway_log(SWAY_INFO, "Re-creating renderer after GPU reset");
+
+	struct wlr_renderer *renderer = fx_renderer_create(server->backend);
+	if (renderer == NULL) {
+		sway_log(SWAY_ERROR, "Unable to create renderer");
+		return;
+	}
+
+	struct wlr_allocator *allocator =
+		wlr_allocator_autocreate(server->backend, renderer);
+	if (allocator == NULL) {
+		sway_log(SWAY_ERROR, "Unable to create allocator");
+		wlr_renderer_destroy(renderer);
+		return;
+	}
+
+	struct wlr_renderer *old_renderer = server->renderer;
+	struct wlr_allocator *old_allocator = server->allocator;
+	server->renderer = renderer;
+	server->allocator = allocator;
+
+	wl_list_remove(&server->renderer_lost.link);
+	wl_signal_add(&server->renderer->events.lost, &server->renderer_lost);
+
+	wlr_compositor_set_renderer(server->compositor, renderer);
+
+	struct sway_output *output;
+	wl_list_for_each(output, &root->all_outputs, link) {
+		wlr_output_init_render(output->wlr_output,
+			server->allocator, server->renderer);
+	}
+
+	wlr_allocator_destroy(old_allocator);
+	wlr_renderer_destroy(old_renderer);
+}
+
 bool server_init(struct sway_server *server) {
 	sway_log(SWAY_DEBUG, "Initializing Wayland server");
 	server->wl_display = wl_display_create();
@@ -134,24 +221,33 @@ bool server_init(struct sway_server *server) {
 
 	wl_display_set_global_filter(server->wl_display, filter_global, NULL);
 
-	server->backend = wlr_backend_autocreate(server->wl_display, &server->session);
+	root = root_create(server->wl_display);
+
+	server->backend = wlr_backend_autocreate(server->wl_event_loop, &server->session);
 	if (!server->backend) {
 		sway_log(SWAY_ERROR, "Unable to create backend");
 		return false;
 	}
 
+	wlr_multi_for_each_backend(server->backend, detect_proprietary, NULL);
+
 	server->renderer = fx_renderer_create(server->backend);
 	if (!server->renderer) {
-		sway_log(SWAY_ERROR, "Failed to create fx_renderer");
+		sway_log(SWAY_ERROR, "Failed to create renderer");
 		return false;
 	}
 
+	server->renderer_lost.notify = handle_renderer_lost;
+	wl_signal_add(&server->renderer->events.lost, &server->renderer_lost);
+
 	wlr_renderer_init_wl_shm(server->renderer, server->wl_display);
 
-	if (wlr_renderer_get_dmabuf_texture_formats(server->renderer) != NULL) {
-		wlr_drm_create(server->wl_display, server->renderer);
+	if (wlr_renderer_get_texture_formats(server->renderer, WLR_BUFFER_CAP_DMABUF) != NULL) {
 		server->linux_dmabuf_v1 = wlr_linux_dmabuf_v1_create_with_renderer(
 			server->wl_display, 4, server->renderer);
+		if (debug.legacy_wl_drm) {
+			wlr_drm_create(server->wl_display, server->renderer);
+		}
 	}
 
 	server->allocator = wlr_allocator_autocreate(server->backend,
@@ -163,9 +259,6 @@ bool server_init(struct sway_server *server) {
 
 	server->compositor = wlr_compositor_create(server->wl_display, 6,
 		server->renderer);
-	server->compositor_new_surface.notify = handle_compositor_new_surface;
-	wl_signal_add(&server->compositor->events.new_surface,
-		&server->compositor_new_surface);
 
 	wlr_subcompositor_create(server->wl_display);
 
@@ -180,11 +273,9 @@ bool server_init(struct sway_server *server) {
 
 	server->new_output.notify = handle_new_output;
 	wl_signal_add(&server->backend->events.new_output, &server->new_output);
-	server->output_layout_change.notify = handle_output_layout_change;
-	wl_signal_add(&root->output_layout->events.change,
-		&server->output_layout_change);
 
-	wlr_xdg_output_manager_v1_create(server->wl_display, root->output_layout);
+	server->xdg_output_manager_v1 =
+		wlr_xdg_output_manager_v1_create(server->wl_display, root->output_layout);
 
 	server->idle_notifier_v1 = wlr_idle_notifier_v1_create(server->wl_display);
 	sway_idle_inhibit_manager_v1_init();
@@ -197,9 +288,9 @@ bool server_init(struct sway_server *server) {
 
 	server->xdg_shell = wlr_xdg_shell_create(server->wl_display,
 		SWAY_XDG_SHELL_VERSION);
-	wl_signal_add(&server->xdg_shell->events.new_surface,
-		&server->xdg_shell_surface);
-	server->xdg_shell_surface.notify = handle_xdg_shell_surface;
+	wl_signal_add(&server->xdg_shell->events.new_toplevel,
+		&server->xdg_shell_toplevel);
+	server->xdg_shell_toplevel.notify = handle_xdg_shell_toplevel;
 
 	server->tablet_v2 = wlr_tablet_v2_create(server->wl_display);
 
@@ -230,8 +321,8 @@ bool server_init(struct sway_server *server) {
 	wl_signal_add(&server->pointer_constraints->events.new_constraint,
 		&server->pointer_constraint);
 
-	server->presentation =
-		wlr_presentation_create(server->wl_display, server->backend);
+	wlr_presentation_create(server->wl_display, server->backend);
+	wlr_alpha_modifier_v1_create(server->wl_display);
 
 	server->output_manager_v1 =
 		wlr_output_manager_v1_create(server->wl_display);
@@ -250,6 +341,8 @@ bool server_init(struct sway_server *server) {
 		&server->output_power_manager_set_mode);
 	server->input_method = wlr_input_method_manager_v2_create(server->wl_display);
 	server->text_input = wlr_text_input_manager_v3_create(server->wl_display);
+	server->foreign_toplevel_list =
+		wlr_ext_foreign_toplevel_list_v1_create(server->wl_display, SWAY_FOREIGN_TOPLEVEL_LIST_VERSION);
 	server->foreign_toplevel_manager =
 		wlr_foreign_toplevel_manager_v1_create(server->wl_display);
 
@@ -277,6 +370,13 @@ bool server_init(struct sway_server *server) {
 	server->content_type_manager_v1 =
 		wlr_content_type_manager_v1_create(server->wl_display, 1);
 	wlr_fractional_scale_manager_v1_create(server->wl_display, 1);
+
+	server->tearing_control_v1 =
+		wlr_tearing_control_manager_v1_create(server->wl_display, 1);
+	server->tearing_control_new_object.notify = handle_new_tearing_hint;
+	wl_signal_add(&server->tearing_control_v1->events.new_object,
+		&server->tearing_control_new_object);
+	wl_list_init(&server->tearing_controllers);
 
 	struct wlr_xdg_foreign_registry *foreign_registry =
 		wlr_xdg_foreign_registry_create(server->wl_display);
@@ -316,7 +416,7 @@ bool server_init(struct sway_server *server) {
 		return false;
 	}
 
-	server->headless_backend = wlr_headless_backend_create(server->wl_display);
+	server->headless_backend = wlr_headless_backend_create(server->wl_event_loop);
 	if (!server->headless_backend) {
 		sway_log(SWAY_ERROR, "Failed to create secondary headless backend");
 		wlr_backend_destroy(server->backend);
@@ -345,16 +445,17 @@ bool server_init(struct sway_server *server) {
 
 void server_fini(struct sway_server *server) {
 	// TODO: free sway-specific resources
-#if HAVE_XWAYLAND
+#if WLR_HAS_XWAYLAND
 	wlr_xwayland_destroy(server->xwayland.wlr_xwayland);
 #endif
 	wl_display_destroy_clients(server->wl_display);
+	wlr_backend_destroy(server->backend);
 	wl_display_destroy(server->wl_display);
 	list_free(server->dirty_nodes);
 }
 
 bool server_start(struct sway_server *server) {
-#if HAVE_XWAYLAND
+#if WLR_HAS_XWAYLAND
 	if (config->xwayland != XWAYLAND_MODE_DISABLED) {
 		sway_log(SWAY_DEBUG, "Initializing Xwayland (lazy=%d)",
 				config->xwayland == XWAYLAND_MODE_LAZY);

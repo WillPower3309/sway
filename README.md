@@ -10,7 +10,6 @@ Sway is an incredible window manager, and certainly one of the most well establi
 + **Anti-aliased rounded corners, borders, and titlebars**
 + **Shadows**
 + **Dim unfocused windows**
-+ **Per application saturation control**: Allows the user to set the saturation (Digital Vibrance) for specific applications. Great for some FPS games!
 + **Scratchpad treated as minimize**: Allows docks, or panels with a taskbar, to correctly interpret minimize / unminimize requests ([thanks to LCBCrion](https://github.com/swaywm/sway/issues/6457))
 + **nixify the repo**: Allows nixos users to easily contribute to and test this project
 
@@ -47,18 +46,29 @@ Sway is an incredible window manager, and certainly one of the most well establi
     - The current layer namespaces can be shown with `swaymsg -r -t get_outputs | jq '.[0].layer_shell_surfaces | .[] | .namespace'`
     - Example: `layer_effects "waybar" blur enable; shadows enable; corner_radius 6`
       - Note: If an application uses gtk, its namespace is likely to be "gtk-layer-shell"
-    - SwayIPC Example: `swaymsg "layer_effects 'waybar' 'blur enable; shadows enable; corner_radius 6'"`
+    - SwayIPC Example: `swaymsg layer_effects "waybar" "blur enable"` (you can only set one effect at a time through `swaymsg`)
+    - Config Example:
+        ```
+        layer_effects "waybar" {
+            blur enable;
+            blur_xray enable;
+            blur_ignore_transparent enable;
+            shadows enable;
+            corner_radius 20;
+        }
+        ```
     - Available Effects:
         - `blur <enable|disable>`
+        - `blur_xray <enable|disable>`
         - `blur_ignore_transparent <enable|disable>`
         - `shadows <enable|disable>`
         - `corner_radius <int>`
+        - `reset`: To reset/disable all previously applied effects to the layer application
 + Dim unfocused windows:
     - `default_dim_inactive <float value 0.0 - 1.0>`
     - `for_window [CRITERIA_HERE] dim_inactive <float value 0.0 - 1.0>`
     - `dim_inactive_colors.unfocused <hex color> ex, #000000FF`
     - `dim_inactive_colors.urgent <hex color> ex, #900000FF`
-+ Application saturation: `for_window [CRITERIA HERE] saturation <set|plus|minus> <val 0.0 <-> 2.0>`
 + Keep/remove separator border between titlebar and content: `titlebar_separator enable|disable`
 + Treat Scratchpad as minimized: `scratchpad_minimize enable|disable`: **we recommend keeping this setting off, as there are many kinks to iron out here**
 
@@ -122,12 +132,6 @@ SwayFX will drop root permissions shortly after startup.
 ## Contributing
 
 SwayFX would love to receive any new features that you're willing to build! Generally, we'd like to focus on eye-candy type improvements to keep our scope appropriate. If you'd like to build something that you think may be out of that focus, please raise an issue and we can discuss whether or not it will fit within this project.
-
-Here's a quick outline of where most of our changes lie vs the main sway repository:
-
-+ `sway/desktop/render.c`: the file that handles calling `fx_renderer` to render to the screen, handles damage tracking and scaling
-+ `sway/desktop/fx_renderer/fx_renderer.c`: the meat and potatoes of this project, structured as similarly to wlr_renderer as possible
-+ `sway/desktop/fx_renderer/shaders`: where all of the shaders that fx_renderer uses live
 
 ## Acknowledgements
 

@@ -1,9 +1,7 @@
 #include <string.h>
 #include "sway/commands.h"
 #include "sway/config.h"
-#include "log.h"
-#include "sway/output.h"
-
+#include "sway/tree/arrange.h"
 
 struct cmd_results *cmd_default_dim_inactive(int argc, char **argv) {
 	struct cmd_results *error = NULL;
@@ -20,10 +18,7 @@ struct cmd_results *cmd_default_dim_inactive(int argc, char **argv) {
 	config->default_dim_inactive = val;
 
 	if (config->active) {
-		for (int i = 0; i < root->outputs->length; ++i) {
-			struct sway_output *output = root->outputs->items[i];
-			output_damage_whole(output);
-		}
+		arrange_root();
 	}
 
 	return cmd_results_new(CMD_SUCCESS, NULL);

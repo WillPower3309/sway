@@ -1,7 +1,7 @@
-#include "scenefx/render/fx_renderer/fx_effect_framebuffers.h"
 #include "sway/commands.h"
 #include "sway/config.h"
 #include "sway/output.h"
+#include "sway/tree/root.h"
 #include "util.h"
 
 struct cmd_results *cmd_blur_xray(int argc, char **argv) {
@@ -16,10 +16,8 @@ struct cmd_results *cmd_blur_xray(int argc, char **argv) {
 
 	struct sway_output *output;
 	wl_list_for_each(output, &root->all_outputs, link) {
-		struct fx_effect_framebuffers *effect_fbos =
-			fx_effect_framebuffers_try_get(output->wlr_output);
-		effect_fbos->blur_buffer_dirty = true;
-		output_damage_whole(output);
+		wlr_scene_optimized_blur_mark_dirty(root->root_scene,
+				output->layers.blur_layer, output->wlr_output);
 	}
 
 	return cmd_results_new(CMD_SUCCESS, NULL);

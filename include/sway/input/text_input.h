@@ -4,7 +4,6 @@
 #include <wlr/types/wlr_text_input_v3.h>
 #include <wlr/types/wlr_input_method_v2.h>
 #include <wlr/types/wlr_compositor.h>
-#include <wlr/types/wlr_fractional_scale_v1.h>
 
 /**
  * The relay structure manages the relationship between text-input and
@@ -36,22 +35,6 @@ struct sway_input_method_relay {
 	struct wl_listener input_method_keyboard_grab_destroy;
 };
 
-struct sway_input_popup {
-	struct sway_input_method_relay *relay;
-	struct wlr_input_popup_surface_v2 *popup_surface;
-
-	int x, y;
-	bool visible;
-
-	struct wl_list link;
-
-	struct wl_listener popup_map;
-	struct wl_listener popup_unmap;
-	struct wl_listener popup_destroy;
-	struct wl_listener popup_surface_commit;
-
-	struct wl_listener focused_surface_unmap;
-};
 
 struct sway_text_input {
 	struct sway_input_method_relay *relay;
@@ -84,10 +67,5 @@ void sway_input_method_relay_set_focus(struct sway_input_method_relay *relay,
 struct sway_text_input *sway_text_input_create(
 	struct sway_input_method_relay *relay,
 	struct wlr_text_input_v3 *text_input);
-
-bool sway_input_popup_get_position(
-        struct sway_input_popup *popup, int *lx, int *ly);
-
-void sway_input_popup_damage(struct sway_input_popup *popup);
 
 #endif

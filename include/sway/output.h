@@ -1,39 +1,17 @@
 #ifndef _SWAY_OUTPUT_H
 #define _SWAY_OUTPUT_H
+#include <scenefx/types/wlr_scene.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_damage_ring.h>
 #include <wlr/types/wlr_output.h>
 #include "config.h"
-#include "scenefx/render/pass.h"
 #include "sway/tree/node.h"
 #include "sway/tree/view.h"
 
-struct decoration_data get_undecorated_decoration_data();
-
 struct sway_server;
 struct sway_container;
-
-struct decoration_data {
-	float alpha;
-	float saturation;
-	int corner_radius;
-	float dim;
-	float *dim_color;
-	bool has_titlebar;
-	bool discard_transparent;
-	bool blur;
-	bool shadow;
-};
-
-struct render_data {
-	struct fx_render_context *ctx;
-	pixman_region32_t *damage;
-	struct wlr_box *clip_box;
-	struct decoration_data deco_data;
-	struct sway_view *view;
-};
 
 struct sway_output_state {
 	list_t *workspaces;
@@ -42,22 +20,39 @@ struct sway_output_state {
 
 struct sway_output {
 	struct sway_node node;
+
+	struct {
+		struct wlr_scene_tree *shell_background;
+		struct wlr_scene_tree *shell_bottom;
+		// Used for optimized blur. Everything exclusively below gets blurred
+		struct wlr_scene_optimized_blur *blur_layer;
+		struct wlr_scene_tree *tiling;
+		struct wlr_scene_tree *fullscreen;
+		struct wlr_scene_tree *shell_top;
+		struct wlr_scene_tree *shell_overlay;
+		struct wlr_scene_tree *session_lock;
+	} layers;
+
+	// when a container is fullscreen, in case the fullscreen surface is
+	// translucent (can see behind) we must make sure that the background is a
+	// solid color in order to conform to the wayland protocol. This rect
+	// ensures that when looking through a surface, all that will be seen
+	// is black.
+	struct wlr_scene_rect *fullscreen_background;
+
 	struct wlr_output *wlr_output;
+	struct wlr_scene_output *scene_output;
 	struct sway_server *server;
 	struct wl_list link;
 
-	struct wl_list layers[4]; // sway_layer_surface::link
 	struct wlr_box usable_area;
-
-	struct timespec last_frame;
-	struct wlr_damage_ring damage_ring;
 
 	int lx, ly; // layout coords
 	int width, height; // transformed buffer size
 	enum wl_output_subpixel detected_subpixel;
 	enum scale_filter_mode scale_filter;
 
-	bool enabling, enabled;
+	bool enabled;
 	list_t *workspaces;
 
 	struct sway_output_state current;
@@ -66,34 +61,27 @@ struct sway_output {
 	struct wl_listener destroy;
 	struct wl_listener commit;
 	struct wl_listener present;
-	struct wl_listener damage;
 	struct wl_listener frame;
-	struct wl_listener needs_frame;
 	struct wl_listener request_state;
 
 	struct {
 		struct wl_signal disable;
 	} events;
 
+	struct wlr_color_transform *color_transform;
+
 	struct timespec last_presentation;
 	uint32_t refresh_nsec;
 	int max_render_time; // In milliseconds
 	struct wl_event_source *repaint_timer;
 	bool gamma_lut_changed;
+	bool allow_tearing;
 };
 
 struct sway_output_non_desktop {
 	struct wlr_output *wlr_output;
 
 	struct wl_listener destroy;
-};
-
-struct fx_render_context {
-	struct sway_output *output;
-	struct wlr_renderer *renderer;
-	pixman_region32_t *output_damage;
-
-	struct fx_gles_render_pass *pass;
 };
 
 struct sway_output *output_create(struct wlr_output *wlr_output);
@@ -114,19 +102,6 @@ typedef void (*sway_surface_iterator_func_t)(struct sway_output *output,
 	struct sway_view *view, struct wlr_surface *surface, struct wlr_box *box,
 	void *user_data);
 
-void output_damage_whole(struct sway_output *output);
-
-void output_damage_surface(struct sway_output *output, double ox, double oy,
-	struct wlr_surface *surface, bool whole);
-
-void output_damage_from_view(struct sway_output *output,
-	struct sway_view *view);
-
-void output_damage_box(struct sway_output *output, struct wlr_box *box);
-
-void output_damage_whole_container(struct sway_output *output,
-	struct sway_container *con);
-
 bool output_match_name_or_id(struct sway_output *output,
 	const char *name_or_id);
 
@@ -142,49 +117,7 @@ void output_enable(struct sway_output *output);
 
 void output_disable(struct sway_output *output);
 
-bool output_has_opaque_overlay_layer_surface(struct sway_output *output);
-
 struct sway_workspace *output_get_active_workspace(struct sway_output *output);
-
-void output_render(struct fx_render_context *ctx);
-
-void output_surface_for_each_surface(struct sway_output *output,
-		struct wlr_surface *surface, double ox, double oy,
-		sway_surface_iterator_func_t iterator, void *user_data);
-
-void output_view_for_each_surface(struct sway_output *output,
-	struct sway_view *view, sway_surface_iterator_func_t iterator,
-	void *user_data);
-
-void output_view_for_each_popup_surface(struct sway_output *output,
-		struct sway_view *view, sway_surface_iterator_func_t iterator,
-		void *user_data);
-
-void output_layer_for_each_surface(struct sway_output *output,
-	struct wl_list *layer_surfaces, sway_surface_iterator_func_t iterator,
-	void *user_data);
-
-void output_layer_for_each_toplevel_surface(struct sway_output *output,
-	struct wl_list *layer_surfaces, sway_surface_iterator_func_t iterator,
-	void *user_data);
-
-void output_layer_for_each_popup_surface(struct sway_output *output,
-	struct wl_list *layer_surfaces, sway_surface_iterator_func_t iterator,
-	void *user_data);
-
-#if HAVE_XWAYLAND
-void output_unmanaged_for_each_surface(struct sway_output *output,
-	struct wl_list *unmanaged, sway_surface_iterator_func_t iterator,
-	void *user_data);
-#endif
-
-void output_input_popups_for_each_surface(struct sway_output *output,
-	struct wl_list *input_popups, sway_surface_iterator_func_t iterator,
-	void *user_data);
-
-void output_drag_icons_for_each_surface(struct sway_output *output,
-	struct wl_list *drag_icons, sway_surface_iterator_func_t iterator,
-	void *user_data);
 
 void output_for_each_workspace(struct sway_output *output,
 		void (*f)(struct sway_workspace *ws, void *data), void *data);
@@ -203,24 +136,8 @@ void output_get_box(struct sway_output *output, struct wlr_box *box);
 enum sway_container_layout output_get_default_layout(
 		struct sway_output *output);
 
-void render_rect(struct fx_render_context *ctx, const struct wlr_box *_box,
-		float color[static 4]);
-
-void render_rounded_rect(struct fx_render_context *ctx, const struct wlr_box *_box,
-		float color[static 4], int corner_radius, enum corner_location corner_location);
-
-void render_blur(struct fx_render_context *ctx, struct wlr_texture *texture,
-		const struct wlr_fbox *src_box, const struct wlr_box *dst_box,
-		bool optimized_blur, pixman_region32_t *opaque_region,
-		struct decoration_data deco_data);
-
-void premultiply_alpha(float color[4], float opacity);
-
-void scale_box(struct wlr_box *box, float scale);
-
 enum wlr_direction opposite_direction(enum wlr_direction d);
 
-void handle_output_layout_change(struct wl_listener *listener, void *data);
 
 void handle_gamma_control_set_gamma(struct wl_listener *listener, void *data);
 
@@ -232,5 +149,7 @@ void handle_output_power_manager_set_mode(struct wl_listener *listener,
 	void *data);
 
 struct sway_output_non_desktop *output_non_desktop_create(struct wlr_output *wlr_output);
+
+void update_output_manager_config(struct sway_server *server);
 
 #endif

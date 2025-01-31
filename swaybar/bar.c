@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -509,7 +508,7 @@ void bar_run(struct swaybar *bar) {
 	}
 #if HAVE_TRAY
 	if (bar->tray) {
-		loop_add_fd(bar->eventloop, bar->tray->fd, POLLIN, tray_in, bar->tray->bus);
+		loop_add_fd(bar->eventloop, bar->tray->fd, POLLIN, tray_in, bar);
 	}
 #endif
 	while (bar->running) {

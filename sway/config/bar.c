@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -13,6 +12,7 @@
 #include "sway/config.h"
 #include "sway/input/keyboard.h"
 #include "sway/output.h"
+#include "sway/server.h"
 #include "config.h"
 #include "list.h"
 #include "log.h"

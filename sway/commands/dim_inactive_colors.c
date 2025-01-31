@@ -1,8 +1,6 @@
-#include "log.h"
 #include "sway/commands.h"
 #include "sway/config.h"
-#include "sway/output.h"
-#include "sway/tree/container.h"
+#include "sway/tree/arrange.h"
 #include "util.h"
 
 static struct cmd_results *handle_command(int argc, char **argv, char *cmd_name,
@@ -20,10 +18,7 @@ static struct cmd_results *handle_command(int argc, char **argv, char *cmd_name,
 	color_to_rgba(config_option, color);
 
 	if (config->active) {
-		for (int i = 0; i < root->outputs->length; ++i) {
-			struct sway_output *output = root->outputs->items[i];
-			output_damage_whole(output);
-		}
+		arrange_root();
 	}
 
 	return cmd_results_new(CMD_SUCCESS, NULL);

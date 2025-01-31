@@ -1,12 +1,13 @@
 #ifndef _SWAY_ROOT_H
 #define _SWAY_ROOT_H
+#include <scenefx/types/wlr_scene.h>
 #include <wayland-server-core.h>
 #include <wayland-util.h>
+#include <wlr/config.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/render/wlr_texture.h>
 #include "sway/tree/container.h"
 #include "sway/tree/node.h"
-#include "config.h"
 #include "list.h"
 
 extern struct sway_root *root;
@@ -15,11 +16,44 @@ struct sway_root {
 	struct sway_node node;
 	struct wlr_output_layout *output_layout;
 
-	struct wl_listener output_layout_change;
-#if HAVE_XWAYLAND
-	struct wl_list xwayland_unmanaged; // sway_xwayland_unmanaged::link
+	// scene node layout:
+	// - root
+	// 	- staging
+	// 	- layer shell stuff
+	// 	- tiling
+	// 	- floating
+	// 	- fullscreen stuff
+	// 	- seat stuff
+	// 	- ext_session_lock
+	struct wlr_scene *root_scene;
+
+	// since wlr_scene nodes can't be orphaned and must always
+	// have a parent, use this staging scene_tree so that a
+	// node always have a valid parent. Nothing in this
+	// staging node will be visible.
+	struct wlr_scene_tree *staging;
+
+	// tree containing all layers the compositor will render. Cursor handling
+	// will end up iterating this tree.
+	struct wlr_scene_tree *layer_tree;
+
+	struct {
+		struct wlr_scene_tree *shell_background;
+		struct wlr_scene_tree *shell_bottom;
+		struct wlr_scene_tree *blur_tree;
+		struct wlr_scene_tree *tiling;
+		struct wlr_scene_tree *floating;
+		struct wlr_scene_tree *shell_top;
+		struct wlr_scene_tree *fullscreen;
+		struct wlr_scene_tree *fullscreen_global;
+#if WLR_HAS_XWAYLAND
+		struct wlr_scene_tree *unmanaged;
 #endif
-	struct wl_list drag_icons; // sway_drag_icon::link
+		struct wlr_scene_tree *shell_overlay;
+		struct wlr_scene_tree *popup;
+		struct wlr_scene_tree *seat;
+		struct wlr_scene_tree *session_lock;
+	} layers;
 
 	// Includes disabled outputs
 	struct wl_list all_outputs; // sway_output::link
@@ -41,7 +75,7 @@ struct sway_root {
 	} events;
 };
 
-struct sway_root *root_create(void);
+struct sway_root *root_create(struct wl_display *display);
 
 void root_destroy(struct sway_root *root);
 

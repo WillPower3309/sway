@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=SwayFX
+Name=Sway
 Comment=An i3-compatible Wayland compositor
 Exec=sway
 Type=Application

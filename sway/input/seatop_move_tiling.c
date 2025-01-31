@@ -1,8 +1,7 @@
-#define _POSIX_C_SOURCE 200809L
 #include <limits.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/util/edges.h>
-#include "sway/desktop.h"
+#include "scenefx/types/fx/corner_location.h"
 #include "sway/desktop/transaction.h"
 #include "sway/input/cursor.h"
 #include "sway/input/seat.h"
@@ -24,49 +23,17 @@ struct seatop_move_tiling_event {
 	struct sway_container *con;
 	struct sway_node *target_node;
 	enum wlr_edges target_edge;
-	struct wlr_box drop_box;
 	double ref_lx, ref_ly; // cursor's x/y at start of op
 	bool threshold_reached;
 	bool split_target;
 	bool insert_after_target;
+	struct wlr_scene_rect *indicator_rect;
 };
 
-static void handle_render(struct sway_seat *seat, struct fx_render_context *ctx) {
+static void handle_end(struct sway_seat *seat) {
 	struct seatop_move_tiling_event *e = seat->seatop_data;
-	if (!e->threshold_reached) {
-		return;
-	}
-	if (e->target_node && node_get_output(e->target_node) == ctx->output) {
-		float color[4];
-		memcpy(&color, config->border_colors.focused.indicator,
-				sizeof(float) * 4);
-		premultiply_alpha(color, 0.5);
-		struct wlr_box box;
-		memcpy(&box, &e->drop_box, sizeof(struct wlr_box));
- 		scale_box(&box, ctx->output->wlr_output->scale);
-
-		struct decoration_data deco_data = get_undecorated_decoration_data();
-		deco_data.blur = e->con->blur_enabled;
-		deco_data.corner_radius = e->con->corner_radius * ctx->output->wlr_output->scale;
-
-		// Render blur
-		if (deco_data.blur && color[3] < 1.0f) {
-			pixman_region32_t opaque_region;
-			pixman_region32_init(&opaque_region);
-			struct wlr_fbox src_box = {0};
-			struct wlr_box blur_box;
-			memcpy(&blur_box, &e->drop_box, sizeof(struct wlr_box));
-			// The render_blur function doesn't use root-relative coordinates
-			blur_box.x -= ctx->output->lx;
-			blur_box.y -= ctx->output->ly;
-			scale_box(&blur_box, ctx->output->wlr_output->scale);
-
-			render_blur(ctx, NULL, &src_box, &blur_box, false, &opaque_region, deco_data);
-			pixman_region32_fini(&opaque_region);
-		}
-
-		render_rounded_rect(ctx, &box, color, deco_data.corner_radius, ALL);
-	}
+	wlr_scene_node_destroy(&e->indicator_rect->node);
+	e->indicator_rect = NULL;
 }
 
 static void handle_motion_prethreshold(struct sway_seat *seat) {
@@ -87,6 +54,7 @@ static void handle_motion_prethreshold(struct sway_seat *seat) {
 
 	// If the threshold has been exceeded, start the actual drag
 	if ((cx - sx) * (cx - sx) + (cy - sy) * (cy - sy) > threshold) {
+		wlr_scene_node_set_enabled(&e->indicator_rect->node, true);
 		e->threshold_reached = true;
 		cursor_set_image(seat->cursor, "grab", NULL);
 	}
@@ -185,6 +153,24 @@ static bool split_titlebar(struct sway_node *node, struct sway_container *avoid,
 	return false;
 }
 
+static void update_indicator(struct seatop_move_tiling_event *e, struct wlr_box *box) {
+	wlr_scene_node_set_position(&e->indicator_rect->node, box->x, box->y);
+	wlr_scene_rect_set_size(e->indicator_rect, box->width, box->height);
+
+	int corner_radius = config->corner_radius;
+	if (e->con) {
+		corner_radius = e->con->corner_radius;
+		// The indicator will be shown above a view if the type is of a container,
+		// otherwise it'll be shown above a container border/title bar
+		if (e->target_node && e->target_node->type != N_CONTAINER) {
+			corner_radius += e->con->current.border_thickness;
+		}
+	}
+	wlr_scene_rect_set_corner_radius(e->indicator_rect,
+			MIN(corner_radius, MIN(box->width / 2, box->height / 2)),
+			CORNER_LOCATION_ALL);
+}
+
 static void handle_motion_postthreshold(struct sway_seat *seat) {
 	struct seatop_move_tiling_event *e = seat->seatop_data;
 	e->split_target = false;
@@ -193,8 +179,6 @@ static void handle_motion_postthreshold(struct sway_seat *seat) {
 	struct sway_cursor *cursor = seat->cursor;
 	struct sway_node *node = node_at_coords(seat,
 			cursor->cursor->x, cursor->cursor->y, &surface, &sx, &sy);
-	// Damage the old location
-	desktop_damage_box(&e->drop_box);
 
 	if (!node) {
 		// Eg. hovered over a layer surface such as swaybar
@@ -207,8 +191,10 @@ static void handle_motion_postthreshold(struct sway_seat *seat) {
 		// Empty workspace
 		e->target_node = node;
 		e->target_edge = WLR_EDGE_NONE;
-		workspace_get_box(node->sway_workspace, &e->drop_box);
-		desktop_damage_box(&e->drop_box);
+
+		struct wlr_box drop_box;
+		workspace_get_box(node->sway_workspace, &drop_box);
+		update_indicator(e, &drop_box);
 		return;
 	}
 
@@ -221,11 +207,18 @@ static void handle_motion_postthreshold(struct sway_seat *seat) {
 		return;
 	}
 
+	struct wlr_box drop_box = {
+		.x = con->pending.content_x,
+		.y = con->pending.content_y,
+		.width = con->pending.content_width,
+		.height = con->pending.content_height,
+	};
+
 	// Check if the cursor is over a tilebar only if the destination
 	// container is not a descendant of the source container.
 	if (!surface && !container_has_ancestor(con, e->con) &&
 			split_titlebar(node, e->con, cursor->cursor,
-				&e->drop_box, &e->insert_after_target)) {
+				&drop_box, &e->insert_after_target)) {
 		// Don't allow dropping over the source container's titlebar
 		// to give users a chance to cancel a drag operation.
 		if (con == e->con) {
@@ -235,6 +228,7 @@ static void handle_motion_postthreshold(struct sway_seat *seat) {
 			e->split_target = true;
 		}
 		e->target_edge = WLR_EDGE_NONE;
+		update_indicator(e, &drop_box);
 		return;
 	}
 
@@ -276,8 +270,7 @@ static void handle_motion_postthreshold(struct sway_seat *seat) {
 				e->target_node = node_get_parent(e->target_node);
 			}
 			e->target_edge = edge;
-			e->drop_box = box;
-			desktop_damage_box(&e->drop_box);
+			update_indicator(e, &box);
 			return;
 		}
 		con = con->pending.parent;
@@ -319,12 +312,8 @@ static void handle_motion_postthreshold(struct sway_seat *seat) {
 	}
 
 	e->target_node = node;
-	e->drop_box.x = con->pending.content_x;
-	e->drop_box.y = con->pending.content_y;
-	e->drop_box.width = con->pending.content_width;
-	e->drop_box.height = con->pending.content_height;
-	resize_box(&e->drop_box, e->target_edge, thickness);
-	desktop_damage_box(&e->drop_box);
+	resize_box(&drop_box, e->target_edge, thickness);
+	update_indicator(e, &drop_box);
 }
 
 static void handle_pointer_motion(struct sway_seat *seat, uint32_t time_msec) {
@@ -430,7 +419,7 @@ static void finalize_move(struct sway_seat *seat) {
 
 static void handle_button(struct sway_seat *seat, uint32_t time_msec,
 		struct wlr_input_device *device, uint32_t button,
-		enum wlr_button_state state) {
+		enum wl_pointer_button_state state) {
 	if (seat->cursor->pressed_button_count == 0) {
 		finalize_move(seat);
 	}
@@ -459,7 +448,7 @@ static const struct sway_seatop_impl seatop_impl = {
 	.pointer_motion = handle_pointer_motion,
 	.tablet_tool_tip = handle_tablet_tool_tip,
 	.unref = handle_unref,
-	.render = handle_render,
+	.end = handle_end,
 };
 
 void seatop_begin_move_tiling_threshold(struct sway_seat *seat,
@@ -471,6 +460,21 @@ void seatop_begin_move_tiling_threshold(struct sway_seat *seat,
 	if (!e) {
 		return;
 	}
+
+	const float *indicator = config->border_colors.focused.indicator;
+	float color[4] = {
+		indicator[0] * .5,
+		indicator[1] * .5,
+		indicator[2] * .5,
+		indicator[3] * .5,
+	};
+	e->indicator_rect = wlr_scene_rect_create(seat->scene_tree, 0, 0, color);
+	if (!e->indicator_rect) {
+		free(e);
+		return;
+	}
+	wlr_scene_rect_set_backdrop_blur(e->indicator_rect, true);
+
 	e->con = con;
 	e->ref_lx = seat->cursor->cursor->x;
 	e->ref_ly = seat->cursor->cursor->y;

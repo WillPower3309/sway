@@ -1,12 +1,14 @@
 #ifndef _SWAY_CONFIG_H
 #define _SWAY_CONFIG_H
 #include <libinput.h>
+#include <scenefx/types/fx/blur_data.h>
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
 #include <wlr/interfaces/wlr_switch.h>
 #include <wlr/types/wlr_tablet_tool.h>
 #include <wlr/util/box.h>
+#include <wlr/render/color.h>
 #include <xkbcommon/xkbcommon.h>
 #include <xf86drmMode.h>
 #include "../include/config.h"
@@ -15,7 +17,6 @@
 #include "stringop.h"
 #include "swaynag.h"
 #include "tree/container.h"
-#include "scenefx/types/fx/blur_data.h"
 #include "sway/input/tablet.h"
 #include "sway/tree/root.h"
 #include "wlr-layer-shell-unstable-v1-protocol.h"
@@ -149,6 +150,7 @@ struct input_config {
 	int accel_profile;
 	struct calibration_matrix calibration_matrix;
 	int click_method;
+	int clickfinger_button_map;
 	int drag;
 	int drag_lock;
 	int dwt;
@@ -261,6 +263,7 @@ enum scale_filter_mode {
 
 enum render_bit_depth {
 	RENDER_BIT_DEPTH_DEFAULT, // the default is currently 8
+	RENDER_BIT_DEPTH_6,
 	RENDER_BIT_DEPTH_8,
 	RENDER_BIT_DEPTH_10,
 };
@@ -286,6 +289,9 @@ struct output_config {
 	int max_render_time; // In milliseconds
 	int adaptive_sync;
 	enum render_bit_depth render_bit_depth;
+	bool set_color_transform;
+	struct wlr_color_transform *color_transform;
+	int allow_tearing;
 
 	char *background;
 	char *background_option;
@@ -487,16 +493,16 @@ struct sway_config {
 		float urgent[4];
 	} dim_inactive_colors;
 
+	bool blur_enabled;
+	bool blur_xray;
+	struct blur_data blur_data;
+
 	bool shadow_enabled;
 	bool shadows_on_csd_enabled;
 	int shadow_blur_sigma;
 	float shadow_color[4];
 	float shadow_inactive_color[4];
 	float shadow_offset_x, shadow_offset_y;
-
-	bool blur_enabled;
-	bool blur_xray;
-	struct blur_data blur_params;
 
 	bool titlebar_separator;
 	bool scratchpad_minimize;
@@ -706,21 +712,27 @@ const char *sway_output_scale_filter_to_string(enum scale_filter_mode scale_filt
 
 struct output_config *new_output_config(const char *name);
 
-void merge_output_config(struct output_config *dst, struct output_config *src);
+bool apply_output_configs(struct output_config **ocs, size_t ocs_len,
+		bool test_only, bool degrade_to_off);
 
-bool apply_output_config(struct output_config *oc, struct sway_output *output);
+void apply_stored_output_configs(void);
 
-bool test_output_config(struct output_config *oc, struct sway_output *output);
-
-struct output_config *store_output_config(struct output_config *oc);
+/**
+ * store_output_config stores a new output config. An output may be matched by
+ * three different config types, in order of precedence: Identifier, name and
+ * wildcard. When storing a config type of lower precedence, assume that the
+ * user wants the config to take immediate effect by superseding (clearing) the
+ * same values from higher presedence configuration.
+ */
+void store_output_config(struct output_config *oc);
 
 struct output_config *find_output_config(struct sway_output *output);
 
-void apply_output_config_to_outputs(struct output_config *oc);
-
-void reset_outputs(void);
-
 void free_output_config(struct output_config *oc);
+
+void request_modeset(void);
+void force_modeset(void);
+bool modeset_is_pending(void);
 
 bool spawn_swaybg(void);
 
@@ -764,14 +776,6 @@ bool translate_binding(struct sway_binding *binding);
 void translate_keysyms(struct input_config *input_config);
 
 void binding_add_translated(struct sway_binding *binding, list_t *bindings);
-
-int config_get_blur_size();
-
-bool config_should_parameters_blur();
-
-bool config_should_parameters_blur_effects();
-
-bool config_should_parameters_shadow();
 
 /* Global config singleton. */
 extern struct sway_config *config;

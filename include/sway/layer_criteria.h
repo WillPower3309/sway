@@ -1,20 +1,19 @@
 #include <stdbool.h>
-#include "sway/layers.h"
-#include "sway/config.h"
 
 struct layer_criteria {
 	char *namespace;
 	char *cmdlist;
+
+	bool shadow_enabled;
+	bool blur_enabled;
+	bool blur_xray;
+	bool blur_ignore_transparent;
+	int corner_radius;
 };
 
 void layer_criteria_destroy(struct layer_criteria *criteria);
 
-bool layer_criteria_is_equal(struct layer_criteria *a, struct layer_criteria *b);
+struct layer_criteria *layer_criteria_add(char *namespace, char *cmdlist);
 
-bool layer_criteria_already_exists(struct layer_criteria *criteria);
-
-// Gathers all of the matching criterias for a specified `sway_layer_surface`
-list_t *layer_criterias_for_sway_layer_surface(struct sway_layer_surface *sway_layer);
-
-// Parses the `layer_criteria` and applies the effects to the `sway_layer_surface`
-void layer_criteria_parse(struct sway_layer_surface *sway_layer, struct layer_criteria *criteria);
+// Get the matching criteria for a specified `sway_layer_surface`
+struct layer_criteria *layer_criteria_for_namespace(char *namespace);
